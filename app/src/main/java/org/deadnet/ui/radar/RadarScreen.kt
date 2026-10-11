@@ -59,8 +59,6 @@ import org.deadnet.transport.TransportType
 fun RadarScreen(
     deviceName: String,
     peers: List<PeerNode>,
-    isAutoConnect: Boolean,
-    onAutoConnectToggle: (Boolean) -> Unit,
     onConnectPeer: (PeerNode) -> Unit,
     onDisconnectPeer: () -> Unit,
     onTriggerScan: () -> Unit,
@@ -105,19 +103,12 @@ fun RadarScreen(
                     )
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "Auto-Connect",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    androidx.compose.material3.Switch(
-                        checked = isAutoConnect,
-                        onCheckedChange = onAutoConnectToggle
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Default.Sensors,
+                    contentDescription = null,
+                    tint = colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
             }
         }
 

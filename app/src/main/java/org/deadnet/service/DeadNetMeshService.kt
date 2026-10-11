@@ -20,6 +20,8 @@ import org.deadnet.MainActivity
 import org.deadnet.crypto.DeadNetCrypto
 import org.deadnet.data.DeadNetDatabase
 import org.deadnet.routing.DtnRoutingEngine
+import org.deadnet.routing.FileTransferManager
+import org.deadnet.transport.ble.BleTransport
 import org.deadnet.transport.wifi.WifiDirectTransport
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -62,6 +64,12 @@ class DeadNetMeshService : Service() {
     lateinit var wifiTransport: WifiDirectTransport
         private set
 
+    lateinit var bleTransport: BleTransport
+        private set
+
+    lateinit var fileTransferManager: FileTransferManager
+        private set
+
     inner class LocalBinder : Binder() {
         fun getService(): DeadNetMeshService = this@DeadNetMeshService
     }
@@ -79,11 +87,19 @@ class DeadNetMeshService : Service() {
         // 2. Initialize Room Database
         database = DeadNetDatabase.getDatabase(this)
 
-        // 3. Initialize DTN Routing Engine
+        // 3. Create FileTransferManager
+        fileTransferManager = FileTransferManager(
+            context = this,
+            ownKeyPair = keyPair,
+            scope = serviceScope
+        )
+
+        // 4. Initialize DTN Routing Engine
         routingEngine = DtnRoutingEngine(
             database = database,
             ownKeyPair = keyPair,
-            scope = serviceScope
+            scope = serviceScope,
+            fileTransferManager = fileTransferManager
         )
 
         // Wire incoming message notification
@@ -91,15 +107,24 @@ class DeadNetMeshService : Service() {
             showIncomingMessageNotification(senderTitle, messageText, convId)
         }
 
-        // 4. Initialize Wi-Fi Direct Transport
+        // 5. Initialize Wi-Fi Direct Transport
         wifiTransport = WifiDirectTransport(
             context = this,
             scope = serviceScope
         )
         routingEngine.registerTransport(wifiTransport)
 
-        // 5. Start Mesh Operations
+        // 6. Initialize BLE Ambient Transport (Stage 2)
+        bleTransport = BleTransport(
+            context = this,
+            ownKeyPair = keyPair,
+            scope = serviceScope
+        )
+        routingEngine.registerTransport(bleTransport)
+
+        // 7. Start Mesh Operations
         routingEngine.start()
+        bleTransport.start()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -153,6 +178,7 @@ class DeadNetMeshService : Service() {
 
     override fun onDestroy() {
         routingEngine.stop()
+        try { bleTransport.stop() } catch (_: Exception) {}
         serviceScope.cancel()
         instance = null
         super.onDestroy()

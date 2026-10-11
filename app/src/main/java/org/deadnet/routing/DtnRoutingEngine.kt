@@ -35,11 +35,13 @@ import java.util.concurrent.ConcurrentHashMap
  * - Reverse ACK processing
  * - Incoming message notifications
  * - Queue Eviction Daemon (10-minute periodic sweep)
+ * - File transfer packet routing via FileTransferManager
  */
 class DtnRoutingEngine(
     private val database: DeadNetDatabase,
     private val ownKeyPair: DeadNetCrypto.KeyPair,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    val fileTransferManager: FileTransferManager
 ) {
     companion object {
         const val DEFAULT_TOKEN_QUOTA = 5
@@ -80,6 +82,7 @@ class DtnRoutingEngine(
         transport.onHandshakeReady = {
             broadcastHandshake()
         }
+        fileTransferManager.registerTransport(transport)
     }
 
     fun start() {
@@ -130,6 +133,13 @@ class DtnRoutingEngine(
         val msgIdStr = packet.msgId.toString()
         val seenDao = database.seenPacketDao()
         val msgDao = database.deadNetMessageDao()
+
+        // 0. Delegate file transfer packets to FileTransferManager
+        if (packet.msgType == PacketType.FILE_METADATA.code || packet.msgType == PacketType.FILE_CHUNK.code) {
+            log("Received file transfer packet (type ${packet.msgType}) — delegating to FileTransferManager")
+            fileTransferManager.handleIncomingPacket(packet)
+            return
+        }
 
         // 1. Process Handshake packets
         if (packet.msgType == PacketType.HANDSHAKE.code) {

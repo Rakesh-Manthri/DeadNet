@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.net.Uri
 import android.os.IBinder
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -19,6 +20,7 @@ import org.deadnet.crypto.DeadNetCrypto
 import org.deadnet.crypto.toHexString
 import org.deadnet.data.DeadNetDatabase
 import org.deadnet.data.DeadNetMessage
+import org.deadnet.data.FileTransferSession
 import org.deadnet.protocol.DeadNetPacket
 import org.deadnet.service.DeadNetMeshService
 import org.deadnet.transport.PeerNode
@@ -57,13 +59,8 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
 
     val myDeviceName: String = "${android.os.Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${android.os.Build.MODEL}"
 
-    private val _isAutoConnect = MutableStateFlow(true)
-    val isAutoConnect: StateFlow<Boolean> = _isAutoConnect.asStateFlow()
-
-    fun toggleAutoConnect(enabled: Boolean) {
-        _isAutoConnect.value = enabled
-        meshService?.wifiTransport?.isAutoConnectEnabled = enabled
-    }
+    private val _fileTransferSessions = MutableStateFlow<Map<String, FileTransferSession>>(emptyMap())
+    val fileTransferSessions: StateFlow<Map<String, FileTransferSession>> = _fileTransferSessions.asStateFlow()
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -74,11 +71,15 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
             meshService?.let { s ->
                 _ownNodeId.value = s.keyPair.nodeId
                 _ownPubKey.value = s.keyPair.publicKey.toHexString()
-                s.wifiTransport.isAutoConnectEnabled = _isAutoConnect.value
 
-                // Bind discovered physical Wi-Fi peers flow
+                // Bind discovered physical Wi-Fi and BLE peers flows
                 viewModelScope.launch {
-                    s.wifiTransport.peersFlow.collect { peerList ->
+                    kotlinx.coroutines.flow.combine(
+                        s.wifiTransport.peersFlow,
+                        s.bleTransport.peersFlow
+                    ) { wifiPeers, blePeers ->
+                        (wifiPeers + blePeers).distinctBy { it.address.ifBlank { it.id } }
+                    }.collect { peerList ->
                         _peers.value = peerList
                     }
                 }
@@ -100,6 +101,13 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
                 viewModelScope.launch {
                     s.routingEngine.logFlow.collect { logList ->
                         _logs.value = logList
+                    }
+                }
+
+                // Bind file transfer sessions flow
+                viewModelScope.launch {
+                    s.fileTransferManager.activeSessions.collect { sessions ->
+                        _fileTransferSessions.value = sessions
                     }
                 }
             }
@@ -126,27 +134,60 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
         _selectedConversationId.value = conversationId
     }
 
+    /**
+     * Opens (or queues opening) a private conversation with a peer.
+     *
+     * If the peer has completed the handshake (exists in knownPeers with a public key),
+     * the conversation is opened immediately under the stable crypto-derived NodeID.
+     *
+     * If the peer is still connecting / handshake not yet received, this waits for
+     * the next knownPeers update and opens the conversation once the peer appears.
+     * This prevents duplicate chat threads caused by premature navigation.
+     */
     fun selectConversationForPeer(peer: PeerNode) {
-        val matched = _knownPeers.value.find { 
-            it.nodeId == peer.nodeId || 
-            (peer.address.isNotBlank() && it.address == peer.address) || 
-            it.name.equals(peer.name, ignoreCase = true) 
-        } ?: _knownPeers.value.firstOrNull { it.isConnected }
-          ?: peer
-
-        val targetConvId = matched.nodeId
-
-        // Migrate any previous messages that might have been stored under peer.address or peer.id
-        viewModelScope.launch(Dispatchers.IO) {
-            if (peer.address.isNotBlank()) {
-                db.deadNetMessageDao().migrateConversation(peer.address, targetConvId, peer.name)
-            }
-            if (peer.id != targetConvId) {
-                db.deadNetMessageDao().migrateConversation(peer.id, targetConvId, peer.name)
-            }
+        // First, check if we already know this peer via their crypto NodeID
+        val knownMatch = _knownPeers.value.find { kp ->
+            kp.nodeId == peer.nodeId ||
+            (peer.address.isNotBlank() && kp.address == peer.address) ||
+            kp.name.equals(peer.name, ignoreCase = true)
         }
 
-        _selectedConversationId.value = targetConvId
+        if (knownMatch != null) {
+            // Peer is already known — navigate immediately under the stable NodeID
+            val targetConvId = knownMatch.nodeId
+            viewModelScope.launch(Dispatchers.IO) {
+                if (peer.address.isNotBlank()) {
+                    db.deadNetMessageDao().migrateConversation(peer.address, targetConvId, knownMatch.name)
+                }
+                if (peer.id != targetConvId) {
+                    db.deadNetMessageDao().migrateConversation(peer.id, targetConvId, knownMatch.name)
+                }
+            }
+            _selectedConversationId.value = targetConvId
+        } else {
+            // Peer not yet handshaked — subscribe and wait for them to appear in knownPeers
+            viewModelScope.launch {
+                _knownPeers.collect { knownList ->
+                    val found = knownList.find { kp ->
+                        (peer.address.isNotBlank() && kp.address == peer.address) ||
+                        kp.name.equals(peer.name, ignoreCase = true)
+                    }
+                    if (found != null) {
+                        val targetConvId = found.nodeId
+                        launch(Dispatchers.IO) {
+                            if (peer.address.isNotBlank()) {
+                                db.deadNetMessageDao().migrateConversation(peer.address, targetConvId, found.name)
+                            }
+                            if (peer.id != targetConvId) {
+                                db.deadNetMessageDao().migrateConversation(peer.id, targetConvId, found.name)
+                            }
+                        }
+                        _selectedConversationId.value = targetConvId
+                        return@collect  // Stop collecting once we've navigated
+                    }
+                }
+            }
+        }
     }
 
     fun sendMessageToConversation(conversationId: String, text: String) {
@@ -308,6 +349,21 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
 
     fun triggerScan() {
         meshService?.wifiTransport?.triggerManualScan()
+    }
+
+    fun sendFile(fileUri: Uri, conversationId: String) {
+        val s = meshService ?: return
+        val targetPeer = _knownPeers.value.find { it.nodeId == conversationId }
+            ?: _peers.value.find { it.nodeId == conversationId && it.hasPublicKey }
+            ?: return
+
+        s.fileTransferManager.sendFile(
+            fileUri = fileUri,
+            peer = targetPeer,
+            onError = { errorMsg ->
+                s.routingEngine.log("[FileTransfer] Error: $errorMsg")
+            }
+        )
     }
 
     override fun onCleared() {

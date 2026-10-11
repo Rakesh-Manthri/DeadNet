@@ -178,15 +178,13 @@ class WifiDirectTransport(
         }
     }
 
-    var isAutoConnectEnabled: Boolean = true
-
     @SuppressLint("MissingPermission")
     fun connectToDevice(deviceAddress: String) {
         val mgr = wifiP2pManager ?: return
         val ch = channel ?: return
 
         isConnectingOrConnected.set(true)
-        log("Initiating P2P connection to $deviceAddress with PBC setup...")
+        log("Initiating P2P connection to $deviceAddress...")
 
         // Cancel any lingering or busy connection request first
         try {
@@ -196,7 +194,9 @@ class WifiDirectTransport(
         val config = WifiP2pConfig().apply {
             this.deviceAddress = deviceAddress
             wps.setup = WpsInfo.PBC
-            groupOwnerIntent = 15 // Request Group Owner to accelerate negotiation
+            // groupOwnerIntent = 0: prefer to be a client so that whichever
+            // device is already a GO stays as GO, enabling multi-device mesh.
+            groupOwnerIntent = 0
         }
 
         // 30-second connection timeout guard
@@ -384,15 +384,6 @@ class WifiDirectTransport(
             )
         }
         _peersFlow.value = mappedPeers
-
-        // Auto-connect feature: If enabled and currently idle, automatically pair with discovered peer
-        if (isAutoConnectEnabled && !isConnectingOrConnected.get() && currentGroupInfo == null) {
-            val candidate = devices.firstOrNull { it.status == WifiP2pDevice.AVAILABLE }
-            if (candidate != null) {
-                log("Auto-Connect: Detected available peer ${candidate.deviceName}. Initiating connection...")
-                connectToDevice(candidate.deviceAddress)
-            }
-        }
     }
 
     private fun handleConnectionInfoAvailable(info: WifiP2pInfo?) {

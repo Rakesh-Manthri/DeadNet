@@ -2,6 +2,7 @@ package org.deadnet
 
 import android.Manifest
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -68,6 +69,7 @@ fun MainNavigation(
     val messages by viewModel.messages.collectAsState()
     val logs by viewModel.logs.collectAsState()
     val selectedConversationId by viewModel.selectedConversationId.collectAsState()
+    val fileTransferSessions by viewModel.fileTransferSessions.collectAsState()
 
     // Request permissions on startup
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -83,11 +85,27 @@ fun MainNavigation(
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+            permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
         permissionLauncher.launch(permissions.toTypedArray())
+    }
+
+    // Intercept back button to prevent unexpected app exit
+    BackHandler(enabled = selectedConversationId != null || selectedTab != DeadNetTab.RADAR) {
+        if (selectedConversationId != null) {
+            // Exit conversation thread back to conversations list
+            viewModel.selectConversation(null)
+        } else if (selectedTab != DeadNetTab.RADAR) {
+            // Return to primary Radar tab
+            selectedTab = DeadNetTab.RADAR
+        }
     }
 
     Scaffold(
@@ -182,8 +200,6 @@ fun MainNavigation(
                 DeadNetTab.RADAR -> RadarScreen(
                     deviceName = viewModel.myDeviceName,
                     peers = peers,
-                    isAutoConnect = viewModel.isAutoConnect.collectAsState().value,
-                    onAutoConnectToggle = { viewModel.toggleAutoConnect(it) },
                     onConnectPeer = { peer -> viewModel.connectToPeer(peer) },
                     onDisconnectPeer = { viewModel.disconnectPeer() },
                     onTriggerScan = { viewModel.triggerScan() },
@@ -196,8 +212,10 @@ fun MainNavigation(
                     messages = messages,
                     knownPeers = knownPeers,
                     selectedConversationId = selectedConversationId,
+                    fileTransferSessions = fileTransferSessions,
                     onSelectConversation = { viewModel.selectConversation(it) },
                     onSendMessage = { convId, text -> viewModel.sendMessageToConversation(convId, text) },
+                    onSendFile = { convId, uri -> viewModel.sendFile(uri, convId) },
                     onDeleteMessage = { viewModel.deleteMessage(it) },
                     onDeleteConversation = { viewModel.deleteConversation(it) },
                     onClearAllMessages = { viewModel.clearAllMessages() }

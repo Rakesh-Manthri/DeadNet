@@ -86,23 +86,29 @@ class DeadNetPacketTest {
     @Test
     fun testBroadcastDetection() {
         val broadcastPacket = DeadNetPacket(
-            msgType = PacketType.SOS.code,
+            msgType = PacketType.DIRECT.code,
             msgId = UUID.randomUUID(),
             senderPubKey = ByteArray(32) { 10 },
             recipientPubKey = DeadNetPacket.BROADCAST_KEY,
             ttl = 1750000000L,
             hopCount = 0,
             tokensRemaining = 0,
-            payload = "EMERGENCY SOS".toByteArray(Charsets.UTF_8)
+            payload = "BROADCAST TEST".toByteArray(Charsets.UTF_8)
         )
 
         assertTrue(broadcastPacket.isBroadcast)
-        assertEquals(PacketType.SOS, broadcastPacket.packetType)
+        assertEquals(PacketType.DIRECT, broadcastPacket.packetType)
 
         val directPacket = broadcastPacket.copy(
             recipientPubKey = ByteArray(32) { 1 }
         )
         assertFalse(directPacket.isBroadcast)
+    }
+
+    @Test
+    fun testFileTransferPacketTypes() {
+        assertEquals(PacketType.FILE_METADATA, PacketType.fromCode(0x05.toByte()))
+        assertEquals(PacketType.FILE_CHUNK, PacketType.fromCode(0x06.toByte()))
     }
 
     @Test
