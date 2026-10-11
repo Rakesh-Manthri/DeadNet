@@ -23,9 +23,10 @@ data class DeadNetMessage(
     val ttlExpiresAt: Long,
     val isDelivered: Boolean = false,
     val isBroadcast: Boolean = false,
-    // Optional helper fields for UI local display
     val decryptedText: String? = null,
-    val isOutgoing: Boolean = false
+    val isOutgoing: Boolean = false,
+    val conversationId: String = "BROADCAST",
+    val conversationTitle: String = "Mesh Broadcast"
 ) {
     val deliveryStatus: DeliveryStatus
         get() = when {
@@ -58,6 +59,8 @@ data class DeadNetMessage(
         if (isBroadcast != other.isBroadcast) return false
         if (decryptedText != other.decryptedText) return false
         if (isOutgoing != other.isOutgoing) return false
+        if (conversationId != other.conversationId) return false
+        if (conversationTitle != other.conversationTitle) return false
 
         return true
     }
@@ -75,6 +78,8 @@ data class DeadNetMessage(
         result = 31 * result + isBroadcast.hashCode()
         result = 31 * result + (decryptedText?.hashCode() ?: 0)
         result = 31 * result + isOutgoing.hashCode()
+        result = 31 * result + conversationId.hashCode()
+        result = 31 * result + conversationTitle.hashCode()
         return result
     }
 }

@@ -21,15 +21,17 @@ import org.deadnet.crypto.DeadNetCrypto
 import org.deadnet.data.DeadNetDatabase
 import org.deadnet.routing.DtnRoutingEngine
 import org.deadnet.transport.wifi.WifiDirectTransport
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Persistent Android ForegroundService maintaining the DeadNet mesh network,
- * peer discovery loops, DTN routing engine, and sticky notification.
+ * peer discovery loops, DTN routing engine, sticky notification, and incoming message notifications.
  */
 class DeadNetMeshService : Service() {
 
     companion object {
         const val CHANNEL_ID = "deadnet_mesh_channel"
+        const val MESSAGES_CHANNEL_ID = "deadnet_messages_channel"
         const val NOTIFICATION_ID = 1337
         const val ACTION_START = "org.deadnet.action.START"
         const val ACTION_STOP = "org.deadnet.action.STOP"
@@ -37,6 +39,8 @@ class DeadNetMeshService : Service() {
         private const val PREFS_NAME = "deadnet_prefs"
         private const val PREF_PRIV_KEY = "priv_key_hex"
         private const val PREF_PUB_KEY = "pub_key_hex"
+
+        private val notificationIdCounter = AtomicInteger(2000)
 
         @Volatile
         var instance: DeadNetMeshService? = null
@@ -67,7 +71,7 @@ class DeadNetMeshService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        createNotificationChannel()
+        createNotificationChannels()
 
         // 1. Initialize or load local identity keypair
         keyPair = loadOrCreateKeyPair()
@@ -81,6 +85,11 @@ class DeadNetMeshService : Service() {
             ownKeyPair = keyPair,
             scope = serviceScope
         )
+
+        // Wire incoming message notification
+        routingEngine.onIncomingMessage = { senderTitle, messageText, convId ->
+            showIncomingMessageNotification(senderTitle, messageText, convId)
+        }
 
         // 4. Initialize Wi-Fi Direct Transport
         wifiTransport = WifiDirectTransport(
@@ -116,6 +125,32 @@ class DeadNetMeshService : Service() {
         return START_STICKY
     }
 
+    fun showIncomingMessageNotification(senderTitle: String, messageText: String, conversationId: String) {
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("conversationId", conversationId)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            notificationIdCounter.incrementAndGet(),
+            launchIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(this, MESSAGES_CHANNEL_ID)
+            .setContentTitle(senderTitle)
+            .setContentText(messageText)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .build()
+
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        manager?.notify(notificationIdCounter.get(), notification)
+    }
+
     override fun onDestroy() {
         routingEngine.stop()
         serviceScope.cancel()
@@ -145,9 +180,9 @@ class DeadNetMeshService : Service() {
             .build()
     }
 
-    private fun createNotificationChannel() {
+    private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
                 "DeadNet Mesh Service",
                 NotificationManager.IMPORTANCE_LOW
@@ -155,8 +190,20 @@ class DeadNetMeshService : Service() {
                 description = "Keeps DeadNet opportunistic mesh radios and routing active."
                 setShowBadge(false)
             }
+
+            val messagesChannel = NotificationChannel(
+                MESSAGES_CHANNEL_ID,
+                "DeadNet Messages",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Notifies you when someone sends a mesh message."
+                enableVibration(true)
+                setShowBadge(true)
+            }
+
             val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            manager.createNotificationChannel(serviceChannel)
+            manager.createNotificationChannel(messagesChannel)
         }
     }
 

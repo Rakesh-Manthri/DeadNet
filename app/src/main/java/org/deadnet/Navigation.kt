@@ -15,8 +15,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Sensors
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -46,12 +46,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import org.deadnet.ui.DeadNetViewModel
 import org.deadnet.ui.chat.ChatScreen
 import org.deadnet.ui.radar.RadarScreen
-import org.deadnet.ui.sos.SosScreen
+import org.deadnet.ui.visualizer.VisualizerScreen
 
 enum class DeadNetTab(val title: String) {
     RADAR("Radar View"),
     CHAT("Mesh Chat"),
-    SOS("Emergency SOS")
+    VISUALIZER("Mesh Visualizer")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -64,14 +64,15 @@ fun MainNavigation(
 
     val ownNodeId by viewModel.ownNodeId.collectAsState()
     val peers by viewModel.peers.collectAsState()
+    val knownPeers by viewModel.knownPeers.collectAsState()
     val messages by viewModel.messages.collectAsState()
     val logs by viewModel.logs.collectAsState()
+    val selectedConversationId by viewModel.selectedConversationId.collectAsState()
 
     // Request permissions on startup
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { grantedMap ->
-        // When permissions granted, immediately trigger peer scan
         if (grantedMap.values.any { it }) {
             viewModel.triggerScan()
         }
@@ -157,14 +158,14 @@ fun MainNavigation(
                 )
 
                 NavigationBarItem(
-                    selected = selectedTab == DeadNetTab.SOS,
-                    onClick = { selectedTab = DeadNetTab.SOS },
-                    icon = { Icon(Icons.Default.Warning, contentDescription = "SOS") },
-                    label = { Text("SOS", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                    selected = selectedTab == DeadNetTab.VISUALIZER,
+                    onClick = { selectedTab = DeadNetTab.VISUALIZER },
+                    icon = { Icon(Icons.Default.Hub, contentDescription = "Visualizer") },
+                    label = { Text("Visualizer", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = Color(0xFFD32F2F),
-                        selectedTextColor = Color(0xFFD32F2F),
-                        indicatorColor = Color(0xFFFFEBEE),
+                        selectedIconColor = colorScheme.primary,
+                        selectedTextColor = colorScheme.primary,
+                        indicatorColor = colorScheme.primary.copy(alpha = 0.15f),
                         unselectedIconColor = colorScheme.onSurfaceVariant,
                         unselectedTextColor = colorScheme.onSurfaceVariant
                     )
@@ -179,19 +180,33 @@ fun MainNavigation(
         ) {
             when (selectedTab) {
                 DeadNetTab.RADAR -> RadarScreen(
-                    ownNodeId = ownNodeId,
+                    deviceName = viewModel.myDeviceName,
                     peers = peers,
+                    isAutoConnect = viewModel.isAutoConnect.collectAsState().value,
+                    onAutoConnectToggle = { viewModel.toggleAutoConnect(it) },
                     onConnectPeer = { peer -> viewModel.connectToPeer(peer) },
                     onDisconnectPeer = { viewModel.disconnectPeer() },
-                    onTriggerScan = { viewModel.triggerScan() }
+                    onTriggerScan = { viewModel.triggerScan() },
+                    onOpenChat = { peer ->
+                        viewModel.selectConversationForPeer(peer)
+                        selectedTab = DeadNetTab.CHAT
+                    }
                 )
                 DeadNetTab.CHAT -> ChatScreen(
                     messages = messages,
-                    onSendMessage = { recipient, text -> viewModel.sendDirectMessage(recipient, text) }
+                    knownPeers = knownPeers,
+                    selectedConversationId = selectedConversationId,
+                    onSelectConversation = { viewModel.selectConversation(it) },
+                    onSendMessage = { convId, text -> viewModel.sendMessageToConversation(convId, text) },
+                    onDeleteMessage = { viewModel.deleteMessage(it) },
+                    onDeleteConversation = { viewModel.deleteConversation(it) },
+                    onClearAllMessages = { viewModel.clearAllMessages() }
                 )
-                DeadNetTab.SOS -> SosScreen(
-                    logs = logs,
-                    onTriggerSos = { viewModel.triggerSos() }
+                DeadNetTab.VISUALIZER -> VisualizerScreen(
+                    ownNodeId = ownNodeId,
+                    peers = peers,
+                    messages = messages,
+                    logs = logs
                 )
             }
         }

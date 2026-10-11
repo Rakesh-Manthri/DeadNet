@@ -54,6 +54,7 @@ class WifiDirectTransport(
 
     override var onPacketReceived: ((DeadNetPacket) -> Unit)? = null
     override var onLogEvent: ((String) -> Unit)? = null
+    override var onHandshakeReady: (() -> Unit)? = null
 
     private var wifiP2pManager: WifiP2pManager? = null
     private var channel: Channel? = null
@@ -94,7 +95,12 @@ class WifiDirectTransport(
             onConnectionClosed = {
                 log("Socket connection closed.")
             }
-        )
+        ).apply {
+            onSocketConnected = {
+                log("Socket connection active! Triggering handshake...")
+                onHandshakeReady?.invoke()
+            }
+        }
 
         registerReceiver()
         startDiscoveryLoop()
@@ -172,21 +178,25 @@ class WifiDirectTransport(
         }
     }
 
+    var isAutoConnectEnabled: Boolean = true
+
     @SuppressLint("MissingPermission")
     fun connectToDevice(deviceAddress: String) {
         val mgr = wifiP2pManager ?: return
         val ch = channel ?: return
 
-        if (!isConnectingOrConnected.compareAndSet(false, true)) {
-            log("Resetting previous connection state to connect to $deviceAddress...")
-            isConnectingOrConnected.set(true)
-        }
-
+        isConnectingOrConnected.set(true)
         log("Initiating P2P connection to $deviceAddress with PBC setup...")
+
+        // Cancel any lingering or busy connection request first
+        try {
+            mgr.cancelConnect(ch, null)
+        } catch (_: Exception) {}
+
         val config = WifiP2pConfig().apply {
             this.deviceAddress = deviceAddress
             wps.setup = WpsInfo.PBC
-            groupOwnerIntent = 7 // Balanced intent
+            groupOwnerIntent = 15 // Request Group Owner to accelerate negotiation
         }
 
         // 30-second connection timeout guard
@@ -203,10 +213,18 @@ class WifiDirectTransport(
             mgr.connect(ch, config, object : ActionListener {
                 override fun onSuccess() {
                     log("P2P Connect request accepted by framework for $deviceAddress")
+                    _peersFlow.value = _peersFlow.value.map {
+                        if (it.address == deviceAddress) it.copy(statusText = "INVITED") else it
+                    }
                 }
 
                 override fun onFailure(reason: Int) {
-                    log("P2P Connect failed for $deviceAddress (code $reason)")
+                    val desc = when (reason) {
+                        WifiP2pManager.BUSY -> "Busy"
+                        WifiP2pManager.P2P_UNSUPPORTED -> "Unsupported"
+                        else -> "Code $reason"
+                    }
+                    log("P2P Connect failed for $deviceAddress ($desc)")
                     isConnectingOrConnected.set(false)
                     connectionTimeoutJob?.cancel()
                 }
@@ -355,7 +373,7 @@ class WifiDirectTransport(
 
             PeerNode(
                 id = device.deviceAddress.replace(":", "").takeLast(8).uppercase(),
-                name = device.deviceName.ifBlank { "DeadNet Peer" },
+                name = device.deviceName.ifBlank { "Nearby Mesh Peer" },
                 transportType = TransportType.WIFI_DIRECT,
                 rssi = -50,
                 lastSeen = System.currentTimeMillis(),
@@ -366,6 +384,15 @@ class WifiDirectTransport(
             )
         }
         _peersFlow.value = mappedPeers
+
+        // Auto-connect feature: If enabled and currently idle, automatically pair with discovered peer
+        if (isAutoConnectEnabled && !isConnectingOrConnected.get() && currentGroupInfo == null) {
+            val candidate = devices.firstOrNull { it.status == WifiP2pDevice.AVAILABLE }
+            if (candidate != null) {
+                log("Auto-Connect: Detected available peer ${candidate.deviceName}. Initiating connection...")
+                connectToDevice(candidate.deviceAddress)
+            }
+        }
     }
 
     private fun handleConnectionInfoAvailable(info: WifiP2pInfo?) {
@@ -375,6 +402,13 @@ class WifiDirectTransport(
         connectionTimeoutJob?.cancel()
 
         log("P2P Group Formed! IsGO: ${info.isGroupOwner}, GO Host: ${info.groupOwnerAddress?.hostAddress}")
+
+        // Mark peers as connected in peersFlow immediately
+        _peersFlow.value = _peersFlow.value.map { peer ->
+            if (peer.statusText == "INVITED" || peer.statusText == "AVAILABLE" || peer.isConnected) {
+                peer.copy(isConnected = true, statusText = "CONNECTED")
+            } else peer
+        }
 
         if (info.isGroupOwner) {
             log("This node is Group Owner (GO). Launching ServerSocket(8888)...")

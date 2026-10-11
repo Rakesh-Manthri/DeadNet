@@ -1,5 +1,6 @@
 package org.deadnet.routing
 
+import android.os.Build
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,15 +22,19 @@ import org.deadnet.protocol.DeadNetPacket
 import org.deadnet.protocol.PacketType
 import org.deadnet.transport.PeerNode
 import org.deadnet.transport.TransportLayer
+import org.deadnet.transport.TransportType
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Delay-Tolerant Mesh Routing Engine implementing:
+ * - Peer Handshake & Verified Public Key Registry
+ * - Private 1-on-1 and Broadcast E2E Encryption / Decryption
  * - Store-Carry-Forward Spray-and-Wait routing (L=5 quota)
  * - Ingress packet deduplication via SeenPacket table
  * - Reverse ACK processing
- * - SOS emergency multi-transport blast
- * - Queue Eviction Daemon (10-minute periodic TTL sweep)
+ * - Incoming message notifications
+ * - Queue Eviction Daemon (10-minute periodic sweep)
  */
 class DtnRoutingEngine(
     private val database: DeadNetDatabase,
@@ -45,9 +50,13 @@ class DtnRoutingEngine(
     private val transports = mutableListOf<TransportLayer>()
     private var evictionJob: Job? = null
 
-    // Event sinks
-    private val _sosAlertFlow = MutableSharedFlow<DeadNetPacket>(extraBufferCapacity = 16)
-    val sosAlertFlow: SharedFlow<DeadNetPacket> = _sosAlertFlow.asSharedFlow()
+    // Known peers discovered through verified Handshake packets (NodeID -> PeerNode)
+    private val knownPeersMap = ConcurrentHashMap<String, PeerNode>()
+    private val _knownPeersFlow = MutableStateFlow<List<PeerNode>>(emptyList())
+    val knownPeersFlow: StateFlow<List<PeerNode>> = _knownPeersFlow.asStateFlow()
+
+    // Notification callback: (senderTitle, messageText, conversationId)
+    var onIncomingMessage: ((senderTitle: String, messageText: String, conversationId: String) -> Unit)? = null
 
     private val _logFlow = MutableStateFlow<List<String>>(emptyList())
     val logFlow: StateFlow<List<String>> = _logFlow.asStateFlow()
@@ -68,6 +77,9 @@ class DtnRoutingEngine(
         transport.onLogEvent = { logMsg ->
             log(logMsg)
         }
+        transport.onHandshakeReady = {
+            broadcastHandshake()
+        }
     }
 
     fun start() {
@@ -84,86 +96,115 @@ class DtnRoutingEngine(
     }
 
     /**
+     * Broadcasts a HELLO/HANDSHAKE packet so connected peers learn our 32-byte public key and name.
+     */
+    fun broadcastHandshake() {
+        scope.launch(Dispatchers.IO) {
+            val deviceName = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
+            val payload = deviceName.toByteArray(Charsets.UTF_8)
+            val packet = DeadNetPacket(
+                msgType = PacketType.HANDSHAKE.code,
+                msgId = UUID.randomUUID(),
+                senderPubKey = ownKeyPair.publicKey,
+                recipientPubKey = DeadNetPacket.BROADCAST_KEY,
+                ttl = (System.currentTimeMillis() / 1000L) + 3600,
+                hopCount = 0,
+                tokensRemaining = 0,
+                payload = payload
+            )
+            log("Broadcasting Handshake (Node: ${ownKeyPair.nodeId}, Name: $deviceName)")
+            transports.forEach { transport ->
+                try {
+                    transport.sendPacket(packet)
+                } catch (e: Exception) {
+                    log("Failed to send handshake on ${transport.transportType}: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /**
      * Ingress pipeline processing for packets received across any transport interface.
      */
     suspend fun handleIngressPacket(packet: DeadNetPacket, sourceTransport: TransportLayer) {
         val msgIdStr = packet.msgId.toString()
-        log("Ingress packet: $msgIdStr (type ${packet.packetType}, hops=${packet.hopCount}, tokens=${packet.tokensRemaining}) via ${sourceTransport.transportType}")
-
         val seenDao = database.seenPacketDao()
         val msgDao = database.deadNetMessageDao()
 
-        // 1. Deduplication check
-        if (seenDao.hasSeen(msgIdStr)) {
-            log("Packet $msgIdStr already seen. Dropping.")
+        // 1. Process Handshake packets
+        if (packet.msgType == PacketType.HANDSHAKE.code) {
+            val senderPub = packet.senderPubKey
+            val senderNodeId = DeadNetCrypto.deriveNodeId(senderPub)
+            if (senderNodeId != ownKeyPair.nodeId) {
+                val peerName = try {
+                    String(packet.payload, Charsets.UTF_8).ifBlank { "DeadNet Node $senderNodeId" }
+                } catch (_: Exception) {
+                    "DeadNet Node $senderNodeId"
+                }
+
+                val isNew = !knownPeersMap.containsKey(senderNodeId)
+                val peer = PeerNode(
+                    id = senderNodeId,
+                    name = peerName,
+                    transportType = sourceTransport.transportType,
+                    rssi = -50,
+                    lastSeen = System.currentTimeMillis(),
+                    isConnected = true,
+                    statusText = "CONNECTED",
+                    publicKey = senderPub
+                )
+                knownPeersMap[senderNodeId] = peer
+                _knownPeersFlow.value = knownPeersMap.values.toList()
+
+                log("Received Handshake from $peerName. Public key registered.")
+
+                // Reply with our handshake if we just learned of them
+                if (isNew) {
+                    broadcastHandshake()
+                }
+
+                // Opportunistic DTN Sync: Flush stored broadcast messages and pending chats to this peer
+                syncStoredMessagesWithPeer(senderPub, sourceTransport)
+            }
             return
         }
 
-        // 2. Record as seen
+        // 2. Ingress deduplication check
+        if (seenDao.hasSeen(msgIdStr)) {
+            log("Packet $msgIdStr already processed. Dropping duplicate.")
+            return
+        }
         seenDao.insert(SeenPacket(msgId = msgIdStr, receivedAt = System.currentTimeMillis()))
 
-        // 3. Check for Reverse ACK
+        // 3. Process Reverse ACK
         if (packet.msgType == PacketType.REVERSE_ACK.code) {
             log("Received Reverse ACK for msgId $msgIdStr. Marking delivered.")
             msgDao.markDelivered(msgIdStr)
             return
         }
 
-        // 4. Check for SOS Broadcast
-        if (packet.msgType == PacketType.SOS.code || packet.isBroadcast) {
-            log("EMERGENCY SOS broadcast received! Triggering siren alert & multi-transport relay.")
-            _sosAlertFlow.tryEmit(packet)
-
-            // Save SOS message locally
-            val sosText = try {
-                String(packet.payload, Charsets.UTF_8)
-            } catch (_: Exception) {
-                "Emergency SOS payload (${packet.payload.size} bytes)"
-            }
-
-            msgDao.insert(
-                DeadNetMessage(
-                    msgId = msgIdStr,
-                    senderPubKey = packet.senderPubKey,
-                    recipientPubKey = packet.recipientPubKey,
-                    ciphertext = packet.payload,
-                    tokensRemaining = 0,
-                    hopCount = (packet.hopCount + 1).coerceAtMost(255),
-                    createdAt = System.currentTimeMillis(),
-                    ttlExpiresAt = packet.ttl * 1000L,
-                    isDelivered = true,
-                    isBroadcast = true,
-                    decryptedText = sosText
-                )
-            )
-
-            // Re-broadcast to all other active transports (mesh flood)
-            val forwardPacket = packet.copy(hopCount = (packet.hopCount + 1).toByte())
-            transports.forEach { transport ->
-                if (transport != sourceTransport && transport.isRunning) {
-                    transport.sendPacket(forwardPacket)
-                }
-            }
-            return
-        }
-
-        // 5. Target Recipient Check
+        // 4. Target Recipient Check: Is it addressed to THIS NODE?
         val isForMe = packet.recipientPubKey.contentEquals(ownKeyPair.publicKey)
         if (isForMe) {
-            log("Packet $msgIdStr is addressed to THIS NODE! Decrypting payload...")
+            val senderPub = packet.senderPubKey
+            val senderNodeId = DeadNetCrypto.deriveNodeId(senderPub)
+            log("Packet $msgIdStr is addressed to THIS NODE. Decrypting...")
+
             var decryptedText: String? = null
             try {
                 val plaintext = DeadNetCrypto.decrypt(ownKeyPair.privateKey, packet.payload)
                 decryptedText = String(plaintext, Charsets.UTF_8)
-                log("Successfully decrypted message: \"$decryptedText\"")
+                log("Successfully decrypted private message: \"$decryptedText\"")
             } catch (e: Exception) {
-                log("Failed to decrypt payload for $msgIdStr: ${e.message}")
+                log("Decryption failed for $msgIdStr: ${e.message}")
             }
+
+            val senderName = knownPeersMap[senderNodeId]?.name ?: "Nearby Peer"
 
             msgDao.insert(
                 DeadNetMessage(
                     msgId = msgIdStr,
-                    senderPubKey = packet.senderPubKey,
+                    senderPubKey = senderPub,
                     recipientPubKey = packet.recipientPubKey,
                     ciphertext = packet.payload,
                     tokensRemaining = 0,
@@ -173,12 +214,18 @@ class DtnRoutingEngine(
                     isDelivered = true,
                     isBroadcast = false,
                     decryptedText = decryptedText,
-                    isOutgoing = false
+                    isOutgoing = false,
+                    conversationId = senderNodeId,
+                    conversationTitle = senderName
                 )
             )
 
+            // Notify user of incoming message
+            if (decryptedText != null) {
+                onIncomingMessage?.invoke(senderName, decryptedText, senderNodeId)
+            }
+
             // Emit Reverse ACK along the link
-            log("Generating Reverse ACK for packet $msgIdStr...")
             val ackPacket = DeadNetPacket(
                 msgType = PacketType.REVERSE_ACK.code,
                 msgId = packet.msgId,
@@ -193,10 +240,59 @@ class DtnRoutingEngine(
             return
         }
 
-        // 6. Store-Carry-Forward (Store payload with tokens)
+        // 5. Broadcast Message Check
+        if (packet.isBroadcast) {
+            log("Received Mesh Broadcast packet $msgIdStr. Decrypting broadcast payload...")
+            var decryptedText: String? = null
+            try {
+                val plaintext = DeadNetCrypto.decrypt(ownKeyPair.privateKey, packet.payload)
+                decryptedText = String(plaintext, Charsets.UTF_8)
+                log("Decrypted broadcast: \"$decryptedText\"")
+            } catch (e: Exception) {
+                decryptedText = try { String(packet.payload, Charsets.UTF_8) } catch (_: Exception) { null }
+            }
+
+            val senderNodeId = DeadNetCrypto.deriveNodeId(packet.senderPubKey)
+            val senderName = knownPeersMap[senderNodeId]?.name ?: "Node $senderNodeId"
+
+            msgDao.insert(
+                DeadNetMessage(
+                    msgId = msgIdStr,
+                    senderPubKey = packet.senderPubKey,
+                    recipientPubKey = DeadNetPacket.BROADCAST_KEY,
+                    ciphertext = packet.payload,
+                    tokensRemaining = 0,
+                    hopCount = (packet.hopCount + 1).coerceAtMost(255),
+                    createdAt = System.currentTimeMillis(),
+                    ttlExpiresAt = packet.ttl * 1000L,
+                    isDelivered = true,
+                    isBroadcast = true,
+                    decryptedText = decryptedText,
+                    isOutgoing = false,
+                    conversationId = "BROADCAST",
+                    conversationTitle = "Mesh Broadcast"
+                )
+            )
+
+            if (decryptedText != null) {
+                onIncomingMessage?.invoke("Mesh Broadcast ($senderName)", decryptedText, "BROADCAST")
+            }
+
+            // Re-flood broadcast to all other interfaces
+            val forwardPacket = packet.copy(hopCount = (packet.hopCount + 1).toByte())
+            transports.forEach { transport ->
+                if (transport != sourceTransport && transport.isRunning) {
+                    transport.sendPacket(forwardPacket)
+                }
+            }
+            return
+        }
+
+        // 6. Store-Carry-Forward (Store payload with tokens for multi-hop delay-tolerant forwarding)
         val incomingTokens = packet.tokensRemaining.toInt() and 0xFF
         val nextHop = (packet.hopCount + 1).coerceAtMost(255)
-        log("Storing carried packet $msgIdStr for store-carry-forward. Tokens: $incomingTokens, NextHop: $nextHop")
+        val targetNodeId = DeadNetCrypto.deriveNodeId(packet.recipientPubKey)
+        log("Storing carried packet $msgIdStr for target $targetNodeId (Tokens: $incomingTokens, Hops: $nextHop)")
 
         msgDao.insert(
             DeadNetMessage(
@@ -211,69 +307,21 @@ class DtnRoutingEngine(
                 isDelivered = false,
                 isBroadcast = false,
                 decryptedText = null,
-                isOutgoing = false
+                isOutgoing = false,
+                conversationId = targetNodeId,
+                conversationTitle = "Carried for $targetNodeId"
             )
         )
     }
 
     /**
-     * Spray-and-Wait Forwarding logic invoked when connecting to a neighbor peer.
+     * Creates and stores an outbound message (Private direct or Mesh Broadcast).
      */
-    suspend fun onNeighborEncountered(peer: PeerNode, transport: TransportLayer) {
-        val msgDao = database.deadNetMessageDao()
-
-        // 1. Check Wait Phase messages (tokens == 1) to see if this peer is the exact recipient
-        val waitPhaseMessages = msgDao.getWaitPhaseMessages()
-        for (msg in waitPhaseMessages) {
-            val peerPubKeyHex = peer.id
-            val targetKeyHex = msg.recipientNodeId
-            if (peerPubKeyHex.equals(targetKeyHex, ignoreCase = true)) {
-                log("Encountered direct target recipient ($targetKeyHex) in Wait Phase! Delivering msg ${msg.msgId}")
-                val packet = DeadNetPacket(
-                    msgType = PacketType.DIRECT.code,
-                    msgId = UUID.fromString(msg.msgId),
-                    senderPubKey = msg.senderPubKey,
-                    recipientPubKey = msg.recipientPubKey,
-                    ttl = msg.ttlExpiresAt / 1000L,
-                    hopCount = msg.hopCount.toByte(),
-                    tokensRemaining = 1,
-                    payload = msg.ciphertext
-                )
-                transport.sendPacket(packet, peer)
-            }
-        }
-
-        // 2. Query Spray Phase messages (tokens > 1)
-        val forwardable = msgDao.getForwardableMessages()
-        for (msg in forwardable) {
-            val currentL = msg.tokensRemaining
-            if (currentL <= 1) continue
-
-            // Split tokens: give floor(L/2) to peer; keep ceil(L/2) locally
-            val peerTokens = currentL / 2
-            val localTokens = currentL - peerTokens
-
-            log("Spray-and-Wait: Splitting message ${msg.msgId} (L=$currentL -> local=$localTokens, peer=$peerTokens)")
-            msgDao.updateTokens(msg.msgId, localTokens)
-
-            val forwardPacket = DeadNetPacket(
-                msgType = PacketType.SPRAY_AND_WAIT.code,
-                msgId = UUID.fromString(msg.msgId),
-                senderPubKey = msg.senderPubKey,
-                recipientPubKey = msg.recipientPubKey,
-                ttl = msg.ttlExpiresAt / 1000L,
-                hopCount = msg.hopCount.toByte(),
-                tokensRemaining = peerTokens.toByte(),
-                payload = msg.ciphertext
-            )
-            transport.sendPacket(forwardPacket, peer)
-        }
-    }
-
-    /**
-     * Creates and stores an outbound direct encrypted message or broadcast packet.
-     */
-    suspend fun sendDirectMessage(recipientPubKey: ByteArray, text: String): DeadNetPacket? {
+    suspend fun sendDirectMessage(
+        recipientPubKey: ByteArray,
+        text: String,
+        recipientName: String = ""
+    ): DeadNetPacket? {
         return try {
             val isBroadcast = DeadNetCrypto.isBroadcastKey(recipientPubKey)
             val effectiveRecipient = if (isBroadcast) DeadNetPacket.BROADCAST_KEY else recipientPubKey
@@ -281,6 +329,9 @@ class DtnRoutingEngine(
             val ciphertext = DeadNetCrypto.encrypt(effectiveRecipient, text.toByteArray(Charsets.UTF_8))
             val nowSec = System.currentTimeMillis() / 1000L
             val ttlSec = nowSec + DEFAULT_TTL_SECONDS
+
+            val targetNodeId = if (isBroadcast) "BROADCAST" else DeadNetCrypto.deriveNodeId(effectiveRecipient)
+            val title = if (isBroadcast) "Mesh Broadcast" else if (recipientName.isNotBlank()) recipientName else "Node $targetNodeId"
 
             val packet = DeadNetPacket(
                 msgType = if (isBroadcast) PacketType.DIRECT.code else PacketType.SPRAY_AND_WAIT.code,
@@ -307,61 +358,34 @@ class DtnRoutingEngine(
                     isDelivered = isBroadcast,
                     isBroadcast = isBroadcast,
                     decryptedText = text,
-                    isOutgoing = true
+                    isOutgoing = true,
+                    conversationId = targetNodeId,
+                    conversationTitle = title
                 )
             )
 
-            val targetDesc = if (isBroadcast) "BROADCAST" else effectiveRecipient.toHexString().take(8)
-            log("Created outbound message $msgId for $targetDesc")
+            log("Dispatched message $msgId to $targetNodeId ($title)")
             transports.forEach { it.sendPacket(packet) }
             packet
         } catch (e: Exception) {
-            log("Failed to send direct message: ${e.message}")
+            log("Error sending message: ${e.message}")
             null
         }
     }
 
-    /**
-     * Creates and blasts an emergency SOS broadcast across all transports.
-     */
-    suspend fun blastSos(latitude: Double, longitude: Double, note: String): DeadNetPacket {
-        val msgId = UUID.randomUUID()
-        val sosPayloadStr = "SOS|LAT:$latitude|LON:$longitude|NOTE:$note|TS:${System.currentTimeMillis()}"
-        val payloadBytes = sosPayloadStr.toByteArray(Charsets.UTF_8)
-        val nowSec = System.currentTimeMillis() / 1000L
-        val ttlSec = nowSec + (3600 * 48) // 48 hours TTL for emergency
+    suspend fun deleteMessage(msgId: String) {
+        database.deadNetMessageDao().deleteMessage(msgId)
+        log("Deleted message $msgId")
+    }
 
-        val packet = DeadNetPacket(
-            msgType = PacketType.SOS.code,
-            msgId = msgId,
-            senderPubKey = ownKeyPair.publicKey,
-            recipientPubKey = DeadNetPacket.BROADCAST_KEY,
-            ttl = ttlSec,
-            hopCount = 0,
-            tokensRemaining = 0,
-            payload = payloadBytes
-        )
+    suspend fun deleteConversation(conversationId: String) {
+        database.deadNetMessageDao().deleteConversation(conversationId)
+        log("Cleared conversation $conversationId")
+    }
 
-        database.deadNetMessageDao().insert(
-            DeadNetMessage(
-                msgId = msgId.toString(),
-                senderPubKey = ownKeyPair.publicKey,
-                recipientPubKey = DeadNetPacket.BROADCAST_KEY,
-                ciphertext = payloadBytes,
-                tokensRemaining = 0,
-                hopCount = 0,
-                createdAt = System.currentTimeMillis(),
-                ttlExpiresAt = ttlSec * 1000L,
-                isDelivered = true,
-                isBroadcast = true,
-                decryptedText = sosPayloadStr,
-                isOutgoing = true
-            )
-        )
-
-        log("BLASTING SOS PACKET $msgId (LAT: $latitude, LON: $longitude) across all transports!")
-        transports.forEach { it.sendPacket(packet) }
-        return packet
+    suspend fun clearAllMessages() {
+        database.deadNetMessageDao().deleteAllMessages()
+        log("Cleared all stored messages")
     }
 
     private fun startEvictionDaemon() {
@@ -372,7 +396,82 @@ class DtnRoutingEngine(
                 val now = System.currentTimeMillis()
                 val deleted = database.deadNetMessageDao().deleteExpired(now)
                 if (deleted > 0) {
-                    log("Queue Eviction Daemon: Purged $deleted expired message(s).")
+                    log("Eviction Daemon: Purged $deleted expired messages.")
+                }
+            }
+        }
+    }
+
+    private fun syncStoredMessagesWithPeer(peerPubKey: ByteArray, transport: TransportLayer) {
+        scope.launch(Dispatchers.IO) {
+            val msgDao = database.deadNetMessageDao()
+            val now = System.currentTimeMillis()
+
+            // 1. Sync recent broadcast messages from the last 2 hours
+            val recentBroadcasts = msgDao.getRecentBroadcastMessages(now - 2 * 3600_000L)
+            if (recentBroadcasts.isNotEmpty()) {
+                log("Flushing ${recentBroadcasts.size} stored broadcast message(s) to connected peer...")
+                recentBroadcasts.forEach { msg ->
+                    val packet = DeadNetPacket(
+                        msgType = PacketType.DIRECT.code,
+                        msgId = java.util.UUID.fromString(msg.msgId),
+                        senderPubKey = msg.senderPubKey,
+                        recipientPubKey = DeadNetPacket.BROADCAST_KEY,
+                        ttl = (msg.ttlExpiresAt / 1000L),
+                        hopCount = msg.hopCount.toByte(),
+                        tokensRemaining = 0,
+                        payload = msg.ciphertext
+                    )
+                    try {
+                        transport.sendPacket(packet)
+                    } catch (_: Exception) {}
+                }
+            }
+
+            // 2. Deliver pending private direct messages for this peer
+            val pendingDirects = msgDao.getPendingDirectMessagesForRecipient(peerPubKey)
+            if (pendingDirects.isNotEmpty()) {
+                log("Delivering ${pendingDirects.size} pending direct message(s) to connected recipient...")
+                pendingDirects.forEach { msg ->
+                    val packet = DeadNetPacket(
+                        msgType = PacketType.DIRECT.code,
+                        msgId = java.util.UUID.fromString(msg.msgId),
+                        senderPubKey = msg.senderPubKey,
+                        recipientPubKey = peerPubKey,
+                        ttl = (msg.ttlExpiresAt / 1000L),
+                        hopCount = msg.hopCount.toByte(),
+                        tokensRemaining = 0,
+                        payload = msg.ciphertext
+                    )
+                    try {
+                        transport.sendPacket(packet)
+                    } catch (_: Exception) {}
+                }
+            }
+
+            // 3. Spray-and-Wait Forwarding: forward carried DTN messages with tokensRemaining > 1
+            val forwardable = msgDao.getForwardableMessages()
+            forwardable.forEach { msg ->
+                if (!msg.senderPubKey.contentEquals(peerPubKey) && !msg.recipientPubKey.contentEquals(peerPubKey)) {
+                    val currentTokens = msg.tokensRemaining
+                    val peerTokens = currentTokens / 2
+                    val localTokens = currentTokens - peerTokens
+                    msgDao.updateTokens(msg.msgId, localTokens)
+
+                    val forwardPacket = DeadNetPacket(
+                        msgType = PacketType.SPRAY_AND_WAIT.code,
+                        msgId = java.util.UUID.fromString(msg.msgId),
+                        senderPubKey = msg.senderPubKey,
+                        recipientPubKey = msg.recipientPubKey,
+                        ttl = (msg.ttlExpiresAt / 1000L),
+                        hopCount = (msg.hopCount + 1).toByte(),
+                        tokensRemaining = peerTokens.toByte(),
+                        payload = msg.ciphertext
+                    )
+                    log("Relaying DTN packet ${msg.msgId} (split: $peerTokens to peer, $localTokens local)")
+                    try {
+                        transport.sendPacket(forwardPacket)
+                    } catch (_: Exception) {}
                 }
             }
         }

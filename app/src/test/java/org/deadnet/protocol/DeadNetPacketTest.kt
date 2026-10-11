@@ -106,6 +106,28 @@ class DeadNetPacketTest {
     }
 
     @Test
+    fun testHandshakePacket() {
+        val handshake = DeadNetPacket(
+            msgType = PacketType.HANDSHAKE.code,
+            msgId = UUID.randomUUID(),
+            senderPubKey = ByteArray(32) { 42 },
+            recipientPubKey = DeadNetPacket.BROADCAST_KEY,
+            ttl = 1750000000L,
+            hopCount = 0,
+            tokensRemaining = 0,
+            payload = "Google Pixel 8".toByteArray(Charsets.UTF_8)
+        )
+
+        assertEquals(PacketType.HANDSHAKE, handshake.packetType)
+        assertTrue(handshake.isBroadcast)
+
+        val serialized = handshake.toByteArray()
+        val restored = DeadNetPacket.fromByteArray(serialized)
+        assertEquals(PacketType.HANDSHAKE, restored.packetType)
+        assertEquals("Google Pixel 8", String(restored.payload, Charsets.UTF_8))
+    }
+
+    @Test
     fun testInvalidMagicRejection() {
         val validPacket = DeadNetPacket(
             msgType = PacketType.DIRECT.code,

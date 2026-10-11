@@ -10,6 +10,7 @@ interface TransportLayer {
 
     var onPacketReceived: ((DeadNetPacket) -> Unit)?
     var onLogEvent: ((String) -> Unit)?
+    var onHandshakeReady: (() -> Unit)?
 
     fun start()
     fun stop()

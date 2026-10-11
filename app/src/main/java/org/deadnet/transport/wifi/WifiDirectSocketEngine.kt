@@ -34,14 +34,14 @@ class WifiDirectSocketEngine(
         const val CONNECT_TIMEOUT_MS = 15000
     }
 
+    private var serverJob: Job? = null
+    private var clientJob: Job? = null
     private var serverSocket: ServerSocket? = null
     private var activeSocket: Socket? = null
     private var activeOutputStream: BufferedOutputStream? = null
 
-    private var serverJob: Job? = null
-    private var clientJob: Job? = null
-
     private val outboundQueue = ConcurrentLinkedQueue<DeadNetPacket>()
+    var onSocketConnected: (() -> Unit)? = null
 
     val isConnected: Boolean
         get() = activeSocket?.isConnected == true && activeSocket?.isClosed == false
@@ -133,6 +133,9 @@ class WifiDirectSocketEngine(
             val inputStream = BufferedInputStream(socket.getInputStream())
             val outputStream = BufferedOutputStream(socket.getOutputStream())
             activeOutputStream = outputStream
+
+            // Notify that socket session is active and ready for handshake exchange
+            onSocketConnected?.invoke()
 
             // Drain any pending outbound packets
             synchronized(outputStream) {

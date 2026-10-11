@@ -57,11 +57,14 @@ import org.deadnet.transport.TransportType
 
 @Composable
 fun RadarScreen(
-    ownNodeId: String,
+    deviceName: String,
     peers: List<PeerNode>,
+    isAutoConnect: Boolean,
+    onAutoConnectToggle: (Boolean) -> Unit,
     onConnectPeer: (PeerNode) -> Unit,
     onDisconnectPeer: () -> Unit,
     onTriggerScan: () -> Unit,
+    onOpenChat: ((PeerNode) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -88,43 +91,32 @@ fun RadarScreen(
             ) {
                 Column {
                     Text(
-                        text = "LOCAL MESH NODE",
+                        text = "THIS DEVICE",
                         color = colorScheme.primary,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 1.sp
                     )
                     Text(
-                        text = "ID: $ownNodeId",
+                        text = deviceName,
                         color = colorScheme.onSurface,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Black,
-                        fontFamily = FontFamily.Monospace
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
                     )
                 }
 
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFF1B5E20)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFF69F0AE))
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "RADIO READY",
-                            color = Color(0xFF69F0AE),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Auto-Connect",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    androidx.compose.material3.Switch(
+                        checked = isAutoConnect,
+                        onCheckedChange = onAutoConnectToggle
+                    )
                 }
             }
         }
@@ -235,7 +227,8 @@ fun RadarScreen(
                     PeerItemCard(
                         peer = peer,
                         onConnect = { onConnectPeer(peer) },
-                        onDisconnect = onDisconnectPeer
+                        onDisconnect = onDisconnectPeer,
+                        onOpenChat = onOpenChat?.let { { it(peer) } }
                     )
                 }
             }
@@ -247,7 +240,8 @@ fun RadarScreen(
 fun PeerItemCard(
     peer: PeerNode,
     onConnect: () -> Unit,
-    onDisconnect: () -> Unit
+    onDisconnect: () -> Unit,
+    onOpenChat: (() -> Unit)? = null
 ) {
     val colorScheme = MaterialTheme.colorScheme
 
@@ -302,14 +296,17 @@ fun PeerItemCard(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "NODE: ${peer.id} • ${peer.statusText}",
+                        text = when {
+                            peer.isConnected -> "CONNECTED • READY"
+                            peer.statusText == "INVITED" -> "PAIRING IN PROGRESS..."
+                            else -> "AVAILABLE NEARBY"
+                        },
                         color = if (peer.isConnected) Color(0xFF2E7D32) else colorScheme.primary,
                         fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Signal: ${peer.rssi} dBm • ${peer.address}",
+                        text = "Wi-Fi Direct • Signal: ${peer.rssi} dBm",
                         color = colorScheme.onSurfaceVariant,
                         fontSize = 10.sp
                     )
@@ -317,13 +314,26 @@ fun PeerItemCard(
             }
 
             if (peer.isConnected) {
-                Button(
-                    onClick = onDisconnect,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC62828)),
-                    shape = RoundedCornerShape(6.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Text(text = "DISCONNECT", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (onOpenChat != null) {
+                        Button(
+                            onClick = onOpenChat,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32)),
+                            shape = RoundedCornerShape(6.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(text = "CHAT", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    Button(
+                        onClick = onDisconnect,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC62828)),
+                        shape = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text(text = "DISCONNECT", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             } else {
                 Button(
