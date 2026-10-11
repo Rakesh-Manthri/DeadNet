@@ -290,13 +290,13 @@ class WifiDirectTransport(
                         val ch = channel ?: return
 
                         @Suppress("DEPRECATION")
-                        val networkInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO, NetworkInfo::class.java)
+                        val connected = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            val info = intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO, NetworkInfo::class.java)
+                            info?.isConnected == true
                         } else {
-                            intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO)
+                            val info = intent.getParcelableExtra<NetworkInfo>(WifiP2pManager.EXTRA_NETWORK_INFO)
+                            info?.isConnected == true
                         }
-
-                        val connected = networkInfo?.isConnected == true
                         log("Wi-Fi P2P connection changed. IsConnected: $connected")
                         if (connected) {
                             try {

@@ -72,6 +72,9 @@ class DeadNetCryptoTest {
         val plaintext = "Tamper detection test".toByteArray(Charsets.UTF_8)
         val sealedCiphertext = DeadNetCrypto.encrypt(bob.publicKey, plaintext)
 
+        // Flip a bit in the ciphertext payload (tampering)
+        sealedCiphertext[sealedCiphertext.size - 1] = (sealedCiphertext[sealedCiphertext.size - 1].toInt() xor 0x01).toByte()
+
         try {
             DeadNetCrypto.decrypt(bob.privateKey, sealedCiphertext)
             fail("Expected authentication exception on tampered ciphertext")
