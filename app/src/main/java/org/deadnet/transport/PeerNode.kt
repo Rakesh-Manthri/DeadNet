@@ -14,5 +14,6 @@ data class PeerNode(
     val lastSeen: Long = System.currentTimeMillis(),
     val address: String = "",
     val isGroupOwner: Boolean = false,
-    val isConnected: Boolean = false
+    val isConnected: Boolean = false,
+    val statusText: String = "AVAILABLE"
 )

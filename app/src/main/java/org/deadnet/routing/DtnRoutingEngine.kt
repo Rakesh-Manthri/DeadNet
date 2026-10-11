@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.deadnet.crypto.DeadNetCrypto
-import org.deadnet.crypto.DeadNetCrypto.toHexString
+import org.deadnet.crypto.toHexString
 import org.deadnet.data.DeadNetDatabase
 import org.deadnet.data.DeadNetMessage
 import org.deadnet.data.SeenPacket
@@ -271,47 +271,54 @@ class DtnRoutingEngine(
     }
 
     /**
-     * Creates and stores an outbound direct encrypted message.
+     * Creates and stores an outbound direct encrypted message or broadcast packet.
      */
-    suspend fun sendDirectMessage(recipientPubKey: ByteArray, text: String): DeadNetPacket {
-        val msgId = UUID.randomUUID()
-        val ciphertext = DeadNetCrypto.encrypt(recipientPubKey, text.toByteArray(Charsets.UTF_8))
-        val nowSec = System.currentTimeMillis() / 1000L
-        val ttlSec = nowSec + DEFAULT_TTL_SECONDS
+    suspend fun sendDirectMessage(recipientPubKey: ByteArray, text: String): DeadNetPacket? {
+        return try {
+            val isBroadcast = DeadNetCrypto.isBroadcastKey(recipientPubKey)
+            val effectiveRecipient = if (isBroadcast) DeadNetPacket.BROADCAST_KEY else recipientPubKey
+            val msgId = UUID.randomUUID()
+            val ciphertext = DeadNetCrypto.encrypt(effectiveRecipient, text.toByteArray(Charsets.UTF_8))
+            val nowSec = System.currentTimeMillis() / 1000L
+            val ttlSec = nowSec + DEFAULT_TTL_SECONDS
 
-        val packet = DeadNetPacket(
-            msgType = PacketType.SPRAY_AND_WAIT.code,
-            msgId = msgId,
-            senderPubKey = ownKeyPair.publicKey,
-            recipientPubKey = recipientPubKey,
-            ttl = ttlSec,
-            hopCount = 0,
-            tokensRemaining = DEFAULT_TOKEN_QUOTA.toByte(),
-            payload = ciphertext
-        )
-
-        // Store locally in database
-        database.deadNetMessageDao().insert(
-            DeadNetMessage(
-                msgId = msgId.toString(),
+            val packet = DeadNetPacket(
+                msgType = if (isBroadcast) PacketType.DIRECT.code else PacketType.SPRAY_AND_WAIT.code,
+                msgId = msgId,
                 senderPubKey = ownKeyPair.publicKey,
-                recipientPubKey = recipientPubKey,
-                ciphertext = ciphertext,
-                tokensRemaining = DEFAULT_TOKEN_QUOTA,
+                recipientPubKey = effectiveRecipient,
+                ttl = ttlSec,
                 hopCount = 0,
-                createdAt = System.currentTimeMillis(),
-                ttlExpiresAt = ttlSec * 1000L,
-                isDelivered = false,
-                isBroadcast = false,
-                decryptedText = text,
-                isOutgoing = true
+                tokensRemaining = if (isBroadcast) 0.toByte() else DEFAULT_TOKEN_QUOTA.toByte(),
+                payload = ciphertext
             )
-        )
 
-        // Dispatch across all active transports
-        log("Created outbound direct message $msgId for ${recipientPubKey.toHexString().take(8)}")
-        transports.forEach { it.sendPacket(packet) }
-        return packet
+            // Store locally in database
+            database.deadNetMessageDao().insert(
+                DeadNetMessage(
+                    msgId = msgId.toString(),
+                    senderPubKey = ownKeyPair.publicKey,
+                    recipientPubKey = effectiveRecipient,
+                    ciphertext = ciphertext,
+                    tokensRemaining = if (isBroadcast) 0 else DEFAULT_TOKEN_QUOTA,
+                    hopCount = 0,
+                    createdAt = System.currentTimeMillis(),
+                    ttlExpiresAt = ttlSec * 1000L,
+                    isDelivered = isBroadcast,
+                    isBroadcast = isBroadcast,
+                    decryptedText = text,
+                    isOutgoing = true
+                )
+            )
+
+            val targetDesc = if (isBroadcast) "BROADCAST" else effectiveRecipient.toHexString().take(8)
+            log("Created outbound message $msgId for $targetDesc")
+            transports.forEach { it.sendPacket(packet) }
+            packet
+        } catch (e: Exception) {
+            log("Failed to send direct message: ${e.message}")
+            null
+        }
     }
 
     /**

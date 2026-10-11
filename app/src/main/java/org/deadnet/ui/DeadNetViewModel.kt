@@ -19,7 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.deadnet.crypto.DeadNetCrypto
-import org.deadnet.crypto.DeadNetCrypto.toHexString
+import org.deadnet.crypto.toHexString
 import org.deadnet.data.DeadNetDatabase
 import org.deadnet.data.DeadNetMessage
 import org.deadnet.protocol.DeadNetPacket
@@ -58,7 +58,7 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
 
             meshService?.let { s ->
                 _ownNodeId.value = s.keyPair.nodeId
-                _ownPubKey.value = DeadNetCrypto.run { s.keyPair.publicKey.toHexString() }
+                _ownPubKey.value = s.keyPair.publicKey.toHexString()
 
                 // Bind peers flow
                 viewModelScope.launch {
@@ -96,23 +96,31 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
     fun sendDirectMessage(recipientPubKeyHex: String, text: String) {
         if (text.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
-            val s = meshService
-            if (s != null) {
-                val recipientKey = try {
-                    if (recipientPubKeyHex.length >= 64) {
-                        DeadNetCrypto.hexToBytes(recipientPubKeyHex)
+            try {
+                val s = meshService
+                if (s != null) {
+                    val trimmed = recipientPubKeyHex.trim()
+                    val recipientKey = if (trimmed.isEmpty()) {
+                        DeadNetPacket.BROADCAST_KEY
                     } else {
-                        // Truncated fallback padding for demo/testing
-                        val key = ByteArray(32)
-                        val bytes = DeadNetCrypto.hexToBytes(recipientPubKeyHex)
-                        System.arraycopy(bytes, 0, key, 0, bytes.size.coerceAtMost(32))
-                        key
+                        try {
+                            val parsed = DeadNetCrypto.hexToBytes(trimmed)
+                            if (parsed.size == 32) {
+                                parsed
+                            } else {
+                                val key = ByteArray(32)
+                                System.arraycopy(parsed, 0, key, 0, parsed.size.coerceAtMost(32))
+                                key
+                            }
+                        } catch (_: Exception) {
+                            DeadNetPacket.BROADCAST_KEY
+                        }
                     }
-                } catch (_: Exception) {
-                    DeadNetPacket.BROADCAST_KEY
-                }
 
-                s.routingEngine.sendDirectMessage(recipientKey, text)
+                    s.routingEngine.sendDirectMessage(recipientKey, text)
+                }
+            } catch (e: Exception) {
+                // Safely log and protect against crash
             }
         }
     }
@@ -134,7 +142,6 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
                     lat = bestLoc.latitude
                     lon = bestLoc.longitude
                 } else {
-                    // Nominal backup coordinates (e.g. command center mock)
                     lat = 37.7749
                     lon = -122.4194
                 }
@@ -149,6 +156,14 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
 
     fun connectToPeer(peer: PeerNode) {
         meshService?.wifiTransport?.connectToDevice(peer.address)
+    }
+
+    fun disconnectPeer() {
+        meshService?.wifiTransport?.disconnectAndResumeDiscovery()
+    }
+
+    fun triggerScan() {
+        meshService?.wifiTransport?.triggerManualScan()
     }
 
     override fun onCleared() {

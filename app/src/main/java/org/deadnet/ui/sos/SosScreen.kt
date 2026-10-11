@@ -27,12 +27,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -55,6 +56,7 @@ fun SosScreen(
     onTriggerSos: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colorScheme = MaterialTheme.colorScheme
     val listState = rememberLazyListState()
 
     // Auto-scroll to bottom of log terminal when new entries arrive
@@ -67,14 +69,15 @@ fun SosScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF0F141C))
+            .background(colorScheme.background)
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // Warning Banner
         Surface(
             shape = RoundedCornerShape(8.dp),
-            color = Color(0xFF2A1517),
+            color = Color(0xFFFFEBEE),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFFCDD2)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Row(
@@ -84,13 +87,13 @@ fun SosScreen(
                 Icon(
                     imageVector = Icons.Default.Warning,
                     contentDescription = null,
-                    tint = Color(0xFFFF5252),
+                    tint = Color(0xFFC62828),
                     modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "EMERGENCY BROADCAST OVERRIDE\nBlasts high-priority distress frames across all radios.",
-                    color = Color(0xFFFF8A80),
+                    text = "EMERGENCY BROADCAST OVERRIDE\nBlasts high-priority distress frames across all mesh radios.",
+                    color = Color(0xFFB71C1C),
                     fontSize = 11.sp,
                     fontWeight = FontWeight.SemiBold,
                     lineHeight = 14.sp
@@ -108,8 +111,8 @@ fun SosScreen(
         // GPS Telemetry Pill
         Surface(
             shape = RoundedCornerShape(20.dp),
-            color = Color(0xFF1B2433),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF2E3D52))
+            color = colorScheme.surface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, colorScheme.outline.copy(alpha = 0.5f))
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
@@ -118,13 +121,13 @@ fun SosScreen(
                 Icon(
                     imageVector = Icons.Default.MyLocation,
                     contentDescription = null,
-                    tint = Color(0xFF69F0AE),
+                    tint = Color(0xFF2E7D32),
                     modifier = Modifier.size(16.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = "GPS LOCK: ACTIVE (37.7749° N, 122.4194° W)",
-                    color = Color(0xFFECEFF1),
+                    color = colorScheme.onSurface,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
@@ -144,13 +147,13 @@ fun SosScreen(
                 Icon(
                     imageVector = Icons.Default.Terminal,
                     contentDescription = null,
-                    tint = Color(0xFF81D4FA),
+                    tint = colorScheme.primary,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = "PHYSICAL FRAME EVENT TERMINAL",
-                    color = Color(0xFFB0BEC5),
+                    color = colorScheme.onSurfaceVariant,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.sp
@@ -158,7 +161,7 @@ fun SosScreen(
             }
             Text(
                 text = "${logs.size} EVENTS",
-                color = Color(0xFF607D8B),
+                color = colorScheme.onSurfaceVariant,
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace
             )
@@ -166,14 +169,14 @@ fun SosScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Terminal Log View Box
+        // Terminal Log View Box (Dark console appearance for high readability)
         Card(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF090D14)),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0D1117)),
             shape = RoundedCornerShape(8.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF1F2B3E))
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF30363D))
         ) {
             if (logs.isEmpty()) {
                 Box(
@@ -183,8 +186,8 @@ fun SosScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "Awaiting physical network events...\nFrames transmitted via Wi-Fi Direct, BLE, and Ultrasonic will appear here.",
-                        color = Color(0xFF546E7A),
+                        text = "Awaiting physical network events...\nFrames transmitted via Wi-Fi Direct will appear here.",
+                        color = Color(0xFF8B949E),
                         fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -205,9 +208,9 @@ fun SosScreen(
                         Text(
                             text = log,
                             color = when {
-                                isSos -> Color(0xFFFF5252)
-                                isSocket -> Color(0xFF69F0AE)
-                                else -> Color(0xFFB0BEC5)
+                                isSos -> Color(0xFFFF7B72)
+                                isSocket -> Color(0xFF7EE787)
+                                else -> Color(0xFFC9D1D9)
                             },
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
@@ -243,7 +246,7 @@ fun SosButton(onTriggerSos: () -> Unit) {
                 .size(160.dp)
                 .scale(pulseScale)
                 .clip(CircleShape)
-                .background(Color(0xFFD32F2F).copy(alpha = 0.25f))
+                .background(Color(0xFFD32F2F).copy(alpha = 0.2f))
         )
 
         // Middle ring

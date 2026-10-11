@@ -2,7 +2,7 @@ package org.deadnet.data
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
-import org.deadnet.crypto.DeadNetCrypto.toHexString
+import org.deadnet.crypto.toHexString
 
 enum class DeliveryStatus {
     STORED_LOCALLY,

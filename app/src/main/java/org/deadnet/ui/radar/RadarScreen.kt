@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CellTower
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
@@ -35,7 +36,9 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -57,19 +60,24 @@ fun RadarScreen(
     ownNodeId: String,
     peers: List<PeerNode>,
     onConnectPeer: (PeerNode) -> Unit,
+    onDisconnectPeer: () -> Unit,
+    onTriggerScan: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colorScheme = MaterialTheme.colorScheme
+
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF0F141C))
+            .background(colorScheme.background)
             .padding(16.dp)
     ) {
         // Node Status Header Card
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF192231)),
-            shape = RoundedCornerShape(12.dp)
+            colors = CardDefaults.cardColors(containerColor = colorScheme.surface),
+            shape = RoundedCornerShape(12.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
         ) {
             Row(
                 modifier = Modifier
@@ -81,14 +89,14 @@ fun RadarScreen(
                 Column {
                     Text(
                         text = "LOCAL MESH NODE",
-                        color = Color(0xFF64B5F6),
+                        color = colorScheme.primary,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 1.sp
                     )
                     Text(
                         text = "ID: $ownNodeId",
-                        color = Color.White,
+                        color = colorScheme.onSurface,
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Black,
                         fontFamily = FontFamily.Monospace
@@ -111,7 +119,7 @@ fun RadarScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "RADIO ACTIVE",
+                            text = "RADIO READY",
                             color = Color(0xFF69F0AE),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold
@@ -127,31 +135,31 @@ fun RadarScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(140.dp)
+                .height(130.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(Color(0xFF141C28))
-                .border(1.dp, Color(0xFF223249), RoundedCornerShape(12.dp)),
+                .background(colorScheme.surfaceVariant)
+                .border(1.dp, colorScheme.outline.copy(alpha = 0.5f), RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center
         ) {
-            RadarPulseEffect()
+            RadarPulseEffect(primaryColor = colorScheme.primary)
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
                     imageVector = Icons.Default.Sensors,
                     contentDescription = null,
-                    tint = Color(0xFF4FC3F7),
+                    tint = colorScheme.primary,
                     modifier = Modifier.size(32.dp)
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "${peers.size} PHYSICAL PEER(S) IN RANGE",
-                    color = Color(0xFFE0E0E0),
+                    text = "${peers.size} PHYSICAL PEER(S) DISCOVERED",
+                    color = colorScheme.onSurface,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.5.sp
                 )
                 Text(
-                    text = "Wi-Fi Direct P2P • Channel Active",
-                    color = Color(0xFF90A4AE),
+                    text = "Wi-Fi Direct P2P Channel Active",
+                    color = colorScheme.onSurfaceVariant,
                     fontSize = 10.sp
                 )
             }
@@ -159,13 +167,37 @@ fun RadarScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        Text(
-            text = "DISCOVERED PEERS",
-            color = Color(0xFFB0BEC5),
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 1.sp
-        )
+        // Discovered Peers Title & Scan Button
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "NEARBY PEERS",
+                color = colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(
+                    onClick = onTriggerScan,
+                    shape = RoundedCornerShape(20.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Scan",
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(text = "SCAN", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
 
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -176,13 +208,22 @@ fun RadarScreen(
                     .weight(1f),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "Scanning for nearby DeadNet nodes...\nKeep Wi-Fi enabled to discover neighbors.",
-                    color = Color(0xFF78909C),
-                    fontSize = 13.sp,
-                    fontFamily = FontFamily.Monospace,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "No DeadNet peers found nearby.\nEnsure Wi-Fi is enabled on both devices.",
+                        color = colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = onTriggerScan,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Search for Peers")
+                    }
+                }
             }
         } else {
             LazyColumn(
@@ -191,7 +232,11 @@ fun RadarScreen(
                 contentPadding = PaddingValues(bottom = 16.dp)
             ) {
                 items(peers, key = { it.address.ifBlank { it.id } }) { peer ->
-                    PeerItemCard(peer = peer, onConnect = { onConnectPeer(peer) })
+                    PeerItemCard(
+                        peer = peer,
+                        onConnect = { onConnectPeer(peer) },
+                        onDisconnect = onDisconnectPeer
+                    )
                 }
             }
         }
@@ -201,12 +246,16 @@ fun RadarScreen(
 @Composable
 fun PeerItemCard(
     peer: PeerNode,
-    onConnect: () -> Unit
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit
 ) {
+    val colorScheme = MaterialTheme.colorScheme
+
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1B2433)),
-        shape = RoundedCornerShape(10.dp)
+        colors = CardDefaults.cardColors(containerColor = colorScheme.surface),
+        shape = RoundedCornerShape(10.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(
             modifier = Modifier
@@ -215,14 +264,17 @@ fun PeerItemCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 // Transport Type Badge
                 Surface(
                     shape = RoundedCornerShape(8.dp),
                     color = when (peer.transportType) {
-                        TransportType.WIFI_DIRECT -> Color(0xFF0D47A1)
-                        TransportType.BLE -> Color(0xFF004D40)
-                        TransportType.ULTRASONIC -> Color(0xFF4A148C)
+                        TransportType.WIFI_DIRECT -> colorScheme.primary
+                        TransportType.BLE -> Color(0xFF00695C)
+                        TransportType.ULTRASONIC -> Color(0xFF6A1B9A)
                     },
                     modifier = Modifier.size(40.dp)
                 ) {
@@ -245,50 +297,60 @@ fun PeerItemCard(
                 Column {
                     Text(
                         text = peer.name,
-                        color = Color.White,
+                        color = colorScheme.onSurface,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "NODE: ${peer.id} • ${peer.transportType.name}",
-                        color = Color(0xFF90CAF9),
+                        text = "NODE: ${peer.id} • ${peer.statusText}",
+                        color = if (peer.isConnected) Color(0xFF2E7D32) else colorScheme.primary,
                         fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Signal: ${peer.rssi} dBm • Addr: ${peer.address}",
-                        color = Color(0xFF78909C),
+                        text = "Signal: ${peer.rssi} dBm • ${peer.address}",
+                        color = colorScheme.onSurfaceVariant,
                         fontSize = 10.sp
                     )
                 }
             }
 
-            Button(
-                onClick = onConnect,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (peer.isConnected) Color(0xFF2E7D32) else Color(0xFF1565C0)
-                ),
-                shape = RoundedCornerShape(6.dp),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-            ) {
-                Text(
-                    text = if (peer.isConnected) "LINKED" else "CONNECT",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                )
+            if (peer.isConnected) {
+                Button(
+                    onClick = onDisconnect,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC62828)),
+                    shape = RoundedCornerShape(6.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(text = "DISCONNECT", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            } else {
+                Button(
+                    onClick = onConnect,
+                    colors = ButtonDefaults.buttonColors(containerColor = colorScheme.primary),
+                    shape = RoundedCornerShape(6.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (peer.statusText == "INVITED") "PAIRING..." else "CONNECT",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-fun RadarPulseEffect() {
+fun RadarPulseEffect(primaryColor: Color) {
     val transition = rememberInfiniteTransition(label = "RadarPulse")
     val alpha by transition.animateFloat(
-        initialValue = 0.8f,
+        initialValue = 0.6f,
         targetValue = 0f,
         animationSpec = infiniteRepeatable(
-            animation = tween(2500, easing = LinearEasing),
+            animation = tween(2200, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "Alpha"
@@ -297,7 +359,7 @@ fun RadarPulseEffect() {
         initialValue = 0.1f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(2500, easing = LinearEasing),
+            animation = tween(2200, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "Radius"
@@ -306,7 +368,7 @@ fun RadarPulseEffect() {
     Canvas(modifier = Modifier.fillMaxSize()) {
         val maxRadius = size.minDimension / 1.8f
         drawCircle(
-            color = Color(0xFF00E5FF).copy(alpha = alpha),
+            color = primaryColor.copy(alpha = alpha),
             radius = maxRadius * radiusRatio,
             style = Stroke(width = 2.dp.toPx())
         )

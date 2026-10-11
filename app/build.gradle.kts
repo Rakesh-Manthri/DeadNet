@@ -17,9 +17,15 @@ android {
     }
 
     buildTypes {
+        debug {
+            isDebuggable = true
+        }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Default to debug signing for testing; replace with production keystore for distribution
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {

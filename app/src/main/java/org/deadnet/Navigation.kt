@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -59,6 +60,7 @@ fun MainNavigation(
     viewModel: DeadNetViewModel = viewModel()
 ) {
     var selectedTab by remember { mutableStateOf(DeadNetTab.RADAR) }
+    val colorScheme = MaterialTheme.colorScheme
 
     val ownNodeId by viewModel.ownNodeId.collectAsState()
     val peers by viewModel.peers.collectAsState()
@@ -68,8 +70,11 @@ fun MainNavigation(
     // Request permissions on startup
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        // Permissions evaluated
+    ) { grantedMap ->
+        // When permissions granted, immediately trigger peer scan
+        if (grantedMap.values.any { it }) {
+            viewModel.triggerScan()
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -106,22 +111,22 @@ fun MainNavigation(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "[${selectedTab.title}]",
-                            color = Color(0xFF90CAF9),
+                            color = colorScheme.primary,
                             fontSize = 13.sp,
-                            fontWeight = FontWeight.Normal
+                            fontWeight = FontWeight.Medium
                         )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF0B0F17),
-                    titleContentColor = Color.White
+                    containerColor = colorScheme.surface,
+                    titleContentColor = colorScheme.onSurface
                 )
             )
         },
         bottomBar = {
             NavigationBar(
-                containerColor = Color(0xFF0B0F17),
-                contentColor = Color.White
+                containerColor = colorScheme.surface,
+                contentColor = colorScheme.onSurface
             ) {
                 NavigationBarItem(
                     selected = selectedTab == DeadNetTab.RADAR,
@@ -129,11 +134,11 @@ fun MainNavigation(
                     icon = { Icon(Icons.Default.Sensors, contentDescription = "Radar") },
                     label = { Text("Radar", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = Color.White,
-                        selectedTextColor = Color(0xFF64B5F6),
-                        indicatorColor = Color(0xFF1E3A5F),
-                        unselectedIconColor = Color(0xFF78909C),
-                        unselectedTextColor = Color(0xFF78909C)
+                        selectedIconColor = colorScheme.primary,
+                        selectedTextColor = colorScheme.primary,
+                        indicatorColor = colorScheme.primary.copy(alpha = 0.15f),
+                        unselectedIconColor = colorScheme.onSurfaceVariant,
+                        unselectedTextColor = colorScheme.onSurfaceVariant
                     )
                 )
 
@@ -143,11 +148,11 @@ fun MainNavigation(
                     icon = { Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "Chat") },
                     label = { Text("Chat", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = Color.White,
-                        selectedTextColor = Color(0xFF64B5F6),
-                        indicatorColor = Color(0xFF1E3A5F),
-                        unselectedIconColor = Color(0xFF78909C),
-                        unselectedTextColor = Color(0xFF78909C)
+                        selectedIconColor = colorScheme.primary,
+                        selectedTextColor = colorScheme.primary,
+                        indicatorColor = colorScheme.primary.copy(alpha = 0.15f),
+                        unselectedIconColor = colorScheme.onSurfaceVariant,
+                        unselectedTextColor = colorScheme.onSurfaceVariant
                     )
                 )
 
@@ -157,11 +162,11 @@ fun MainNavigation(
                     icon = { Icon(Icons.Default.Warning, contentDescription = "SOS") },
                     label = { Text("SOS", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = Color(0xFFFF5252),
-                        selectedTextColor = Color(0xFFFF5252),
-                        indicatorColor = Color(0xFF4A121A),
-                        unselectedIconColor = Color(0xFF78909C),
-                        unselectedTextColor = Color(0xFF78909C)
+                        selectedIconColor = Color(0xFFD32F2F),
+                        selectedTextColor = Color(0xFFD32F2F),
+                        indicatorColor = Color(0xFFFFEBEE),
+                        unselectedIconColor = colorScheme.onSurfaceVariant,
+                        unselectedTextColor = colorScheme.onSurfaceVariant
                     )
                 )
             }
@@ -176,7 +181,9 @@ fun MainNavigation(
                 DeadNetTab.RADAR -> RadarScreen(
                     ownNodeId = ownNodeId,
                     peers = peers,
-                    onConnectPeer = { peer -> viewModel.connectToPeer(peer) }
+                    onConnectPeer = { peer -> viewModel.connectToPeer(peer) },
+                    onDisconnectPeer = { viewModel.disconnectPeer() },
+                    onTriggerScan = { viewModel.triggerScan() }
                 )
                 DeadNetTab.CHAT -> ChatScreen(
                     messages = messages,

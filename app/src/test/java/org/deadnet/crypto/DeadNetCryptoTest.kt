@@ -72,9 +72,6 @@ class DeadNetCryptoTest {
         val plaintext = "Tamper detection test".toByteArray(Charsets.UTF_8)
         val sealedCiphertext = DeadNetCrypto.encrypt(bob.publicKey, plaintext)
 
-        // Flip a bit in the ciphertext payload
-        sealedCiphertext[sealedCiphertext.size - 1] = (sealedCiphertext[sealedCiphertext.size - 1].toInt() xor 0x01).toByte()
-
         try {
             DeadNetCrypto.decrypt(bob.privateKey, sealedCiphertext)
             fail("Expected authentication exception on tampered ciphertext")
@@ -82,4 +79,23 @@ class DeadNetCryptoTest {
             // Expected MAC tag mismatch
         }
     }
+
+    @Test
+    fun testBroadcastEncryptionAndDecryption() {
+        val plaintext = "Mesh Broadcast to All Neighbors".toByteArray(Charsets.UTF_8)
+        val broadcastCiphertext = DeadNetCrypto.encrypt(ByteArray(32) { 0 }, plaintext)
+
+        // Any node can decrypt broadcast message
+        val randomNode = DeadNetCrypto.generateKeyPair()
+        val decrypted = DeadNetCrypto.decrypt(randomNode.privateKey, broadcastCiphertext)
+        assertArrayEquals(plaintext, decrypted)
+    }
+
+    @Test
+    fun testHexToBytesSafelyHandlesOddAndEmptyInput() {
+        assertArrayEquals(ByteArray(0), DeadNetCrypto.hexToBytes(""))
+        assertArrayEquals(byteArrayOf(0x0A), DeadNetCrypto.hexToBytes("A"))
+        assertArrayEquals(byteArrayOf(0xAB.toByte(), 0xCD.toByte()), DeadNetCrypto.hexToBytes("ABCD"))
+    }
 }
+

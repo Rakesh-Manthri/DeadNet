@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.NetworkInfo
+import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pDeviceList
@@ -59,6 +60,7 @@ class WifiDirectTransport(
     private var receiver: BroadcastReceiver? = null
 
     private var discoveryLoopJob: Job? = null
+    private var connectionTimeoutJob: Job? = null
     private val isConnectingOrConnected = AtomicBoolean(false)
     private var currentGroupInfo: WifiP2pInfo? = null
 
@@ -72,12 +74,16 @@ class WifiDirectTransport(
 
         wifiP2pManager = context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
         if (wifiP2pManager == null) {
-            log("Error: Wi-Fi P2P Service not available on this device.")
+            log("Error: Wi-Fi P2P Service not supported on this hardware.")
             _isRunning = false
             return
         }
 
-        channel = wifiP2pManager?.initialize(context, Looper.getMainLooper(), null)
+        channel = wifiP2pManager?.initialize(context, Looper.getMainLooper()) {
+            log("Wi-Fi P2P Channel disconnected! Re-initializing...")
+            channel = null
+            start()
+        }
 
         socketEngine = WifiDirectSocketEngine(
             scope = scope,
@@ -85,9 +91,8 @@ class WifiDirectTransport(
                 onPacketReceived?.invoke(packet)
             },
             onLog = { msg -> log("[Socket] $msg") },
-            onExchangeCompleted = {
-                log("Exchange completed. Disconnecting group to resume discovery cycle...")
-                disconnectAndResumeDiscovery()
+            onConnectionClosed = {
+                log("Socket connection closed.")
             }
         )
 
@@ -102,6 +107,7 @@ class WifiDirectTransport(
 
         discoveryLoopJob?.cancel()
         discoveryLoopJob = null
+        connectionTimeoutJob?.cancel()
 
         unregisterReceiver()
         socketEngine?.stop()
@@ -123,6 +129,11 @@ class WifiDirectTransport(
         return true
     }
 
+    fun triggerManualScan() {
+        log("Manual scan requested by user.")
+        triggerDiscovery()
+    }
+
     private fun startDiscoveryLoop() {
         discoveryLoopJob?.cancel()
         discoveryLoopJob = scope.launch(Dispatchers.Default) {
@@ -130,7 +141,7 @@ class WifiDirectTransport(
                 if (!isConnectingOrConnected.get()) {
                     triggerDiscovery()
                 }
-                delay(20000) // Repeat every 20 seconds
+                delay(15000) // Re-scan every 15 seconds
             }
         }
     }
@@ -140,16 +151,25 @@ class WifiDirectTransport(
         val mgr = wifiP2pManager ?: return
         val ch = channel ?: return
 
-        log("Triggering Wi-Fi P2P discoverPeers()...")
-        mgr.discoverPeers(ch, object : ActionListener {
-            override fun onSuccess() {
-                log("Wi-Fi P2P discovery initiated successfully.")
-            }
+        try {
+            mgr.discoverPeers(ch, object : ActionListener {
+                override fun onSuccess() {
+                    log("Wi-Fi P2P discoverPeers() initiated.")
+                }
 
-            override fun onFailure(reason: Int) {
-                log("Wi-Fi P2P discovery failed. Reason code: $reason")
-            }
-        })
+                override fun onFailure(reason: Int) {
+                    val reasonDesc = when (reason) {
+                        WifiP2pManager.P2P_UNSUPPORTED -> "P2P Unsupported"
+                        WifiP2pManager.ERROR -> "Internal Error"
+                        WifiP2pManager.BUSY -> "Framework Busy"
+                        else -> "Code $reason"
+                    }
+                    log("discoverPeers() failed: $reasonDesc")
+                }
+            })
+        } catch (e: SecurityException) {
+            log("Permission required for peer discovery: ${e.message}")
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -158,27 +178,60 @@ class WifiDirectTransport(
         val ch = channel ?: return
 
         if (!isConnectingOrConnected.compareAndSet(false, true)) {
-            log("Already connecting or connected. Skipping connect request for $deviceAddress")
-            return
+            log("Resetting previous connection state to connect to $deviceAddress...")
+            isConnectingOrConnected.set(true)
         }
 
-        log("Initiating P2P connection to $deviceAddress...")
+        log("Initiating P2P connection to $deviceAddress with PBC setup...")
         val config = WifiP2pConfig().apply {
             this.deviceAddress = deviceAddress
-            // Group owner intent: balanced 7
-            groupOwnerIntent = 7
+            wps.setup = WpsInfo.PBC
+            groupOwnerIntent = 7 // Balanced intent
         }
 
-        mgr.connect(ch, config, object : ActionListener {
-            override fun onSuccess() {
-                log("P2P Connect request initiated successfully to $deviceAddress")
-            }
-
-            override fun onFailure(reason: Int) {
-                log("P2P Connect failed to $deviceAddress (code $reason)")
+        // 30-second connection timeout guard
+        connectionTimeoutJob?.cancel()
+        connectionTimeoutJob = scope.launch {
+            delay(30000)
+            if (isConnectingOrConnected.get() && currentGroupInfo == null) {
+                log("Connection attempt timed out. Resetting connection lock.")
                 isConnectingOrConnected.set(false)
             }
-        })
+        }
+
+        try {
+            mgr.connect(ch, config, object : ActionListener {
+                override fun onSuccess() {
+                    log("P2P Connect request accepted by framework for $deviceAddress")
+                }
+
+                override fun onFailure(reason: Int) {
+                    log("P2P Connect failed for $deviceAddress (code $reason)")
+                    isConnectingOrConnected.set(false)
+                    connectionTimeoutJob?.cancel()
+                }
+            })
+        } catch (e: SecurityException) {
+            log("Missing permission to connect: ${e.message}")
+            isConnectingOrConnected.set(false)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun disconnectAndResumeDiscovery() {
+        log("Disconnecting P2P group and resuming discovery...")
+        socketEngine?.stop()
+        disconnectGroup()
+        currentGroupInfo = null
+        isConnectingOrConnected.set(false)
+        connectionTimeoutJob?.cancel()
+
+        scope.launch {
+            delay(2000)
+            if (_isRunning) {
+                triggerDiscovery()
+            }
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -186,29 +239,17 @@ class WifiDirectTransport(
         val mgr = wifiP2pManager ?: return
         val ch = channel ?: return
 
-        mgr.removeGroup(ch, object : ActionListener {
-            override fun onSuccess() {
-                log("P2P Group removed successfully.")
-            }
+        try {
+            mgr.removeGroup(ch, object : ActionListener {
+                override fun onSuccess() {
+                    log("P2P Group cleared.")
+                }
 
-            override fun onFailure(reason: Int) {
-                log("Failed to remove P2P group (code $reason)")
-            }
-        })
-    }
-
-    private fun disconnectAndResumeDiscovery() {
-        socketEngine?.stop()
-        disconnectGroup()
-        currentGroupInfo = null
-        isConnectingOrConnected.set(false)
-
-        scope.launch {
-            delay(3000)
-            if (_isRunning && !isConnectingOrConnected.get()) {
-                triggerDiscovery()
-            }
-        }
+                override fun onFailure(reason: Int) {
+                    // Ignore failure if no group existed
+                }
+            })
+        } catch (_: Exception) {}
     }
 
     private fun registerReceiver() {
@@ -226,16 +267,22 @@ class WifiDirectTransport(
                     WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
                         val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
                         val isEnabled = state == WifiP2pManager.WIFI_P2P_STATE_ENABLED
-                        log("Wi-Fi P2P state changed: ${if (isEnabled) "ENABLED" else "DISABLED"}")
+                        log("Wi-Fi P2P Radio: ${if (isEnabled) "ENABLED" else "DISABLED"}")
+                        if (isEnabled && _isRunning) {
+                            triggerDiscovery()
+                        }
                     }
 
                     WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                        log("Wi-Fi P2P peers changed. Requesting peer list...")
                         val mgr = wifiP2pManager ?: return
                         val ch = channel ?: return
-                        mgr.requestPeers(ch, PeerListListener { peers: WifiP2pDeviceList? ->
-                            handlePeersAvailable(peers)
-                        })
+                        try {
+                            mgr.requestPeers(ch) { peers: WifiP2pDeviceList? ->
+                                handlePeersAvailable(peers)
+                            }
+                        } catch (e: SecurityException) {
+                            log("requestPeers permission error: ${e.message}")
+                        }
                     }
 
                     WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
@@ -249,11 +296,16 @@ class WifiDirectTransport(
                             intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO)
                         }
 
-                        log("Wi-Fi P2P connection changed. IsConnected: ${networkInfo?.isConnected}")
-                        if (networkInfo?.isConnected == true) {
-                            mgr.requestConnectionInfo(ch, ConnectionInfoListener { info ->
-                                handleConnectionInfoAvailable(info)
-                            })
+                        val connected = networkInfo?.isConnected == true
+                        log("Wi-Fi P2P connection changed. IsConnected: $connected")
+                        if (connected) {
+                            try {
+                                mgr.requestConnectionInfo(ch) { info ->
+                                    handleConnectionInfoAvailable(info)
+                                }
+                            } catch (e: SecurityException) {
+                                log("requestConnectionInfo permission error: ${e.message}")
+                            }
                         } else {
                             isConnectingOrConnected.set(false)
                             currentGroupInfo = null
@@ -268,7 +320,7 @@ class WifiDirectTransport(
                         } else {
                             intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE)
                         }
-                        log("This device changed: ${device?.deviceName} (${device?.deviceAddress})")
+                        log("This device: ${device?.deviceName} (${device?.deviceAddress})")
                     }
                 }
             }
@@ -291,40 +343,45 @@ class WifiDirectTransport(
         log("Discovered ${devices.size} Wi-Fi Direct peer(s)")
 
         val mappedPeers = devices.map { device ->
+            val statusDesc = when (device.status) {
+                WifiP2pDevice.CONNECTED -> "CONNECTED"
+                WifiP2pDevice.INVITED -> "INVITED"
+                WifiP2pDevice.FAILED -> "FAILED"
+                WifiP2pDevice.AVAILABLE -> "AVAILABLE"
+                WifiP2pDevice.UNAVAILABLE -> "UNAVAILABLE"
+                else -> "UNKNOWN"
+            }
+            val isDevConnected = device.status == WifiP2pDevice.CONNECTED
+
             PeerNode(
                 id = device.deviceAddress.replace(":", "").takeLast(8).uppercase(),
                 name = device.deviceName.ifBlank { "DeadNet Peer" },
                 transportType = TransportType.WIFI_DIRECT,
-                rssi = -50, // Android Wi-Fi P2P does not expose raw RSSI on standard API; nominal value
+                rssi = -50,
                 lastSeen = System.currentTimeMillis(),
                 address = device.deviceAddress,
                 isGroupOwner = false,
-                isConnected = isConnectingOrConnected.get()
+                isConnected = isDevConnected,
+                statusText = statusDesc
             )
         }
         _peersFlow.value = mappedPeers
-
-        // Opportunistic mesh connection: if not connected and peers available, pick the first
-        if (!isConnectingOrConnected.get() && mappedPeers.isNotEmpty()) {
-            val candidate = mappedPeers.first()
-            log("Opportunistic auto-connect to peer: ${candidate.name} (${candidate.address})")
-            connectToDevice(candidate.address)
-        }
     }
 
     private fun handleConnectionInfoAvailable(info: WifiP2pInfo?) {
         if (info == null || !info.groupFormed) return
         currentGroupInfo = info
         isConnectingOrConnected.set(true)
+        connectionTimeoutJob?.cancel()
 
-        log("Group formed! GroupOwner: ${info.isGroupOwner}, GO Address: ${info.groupOwnerAddress?.hostAddress}")
+        log("P2P Group Formed! IsGO: ${info.isGroupOwner}, GO Host: ${info.groupOwnerAddress?.hostAddress}")
 
         if (info.isGroupOwner) {
-            log("Configuring this node as Group Owner (GO). Launching ServerSocket...")
+            log("This node is Group Owner (GO). Launching ServerSocket(8888)...")
             socketEngine?.startServer()
         } else {
             val goHost = info.groupOwnerAddress?.hostAddress ?: "192.168.49.1"
-            log("Configuring this node as Client. Connecting to GO at $goHost...")
+            log("This node is Group Client. Connecting to GO at $goHost:8888...")
             socketEngine?.startClient(goHost)
         }
     }

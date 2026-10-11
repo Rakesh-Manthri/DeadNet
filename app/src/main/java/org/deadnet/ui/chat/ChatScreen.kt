@@ -1,7 +1,6 @@
 package org.deadnet.ui.chat
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,13 +22,12 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -58,47 +56,61 @@ fun ChatScreen(
     onSendMessage: (recipientPubKeyHex: String, text: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colorScheme = MaterialTheme.colorScheme
     var recipientInput by remember { mutableStateOf("") }
     var messageText by remember { mutableStateOf("") }
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF0F141C))
+            .background(colorScheme.background)
             .padding(16.dp)
     ) {
         // Target Recipient Header Input
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF192231)),
-            shape = RoundedCornerShape(10.dp)
+            colors = CardDefaults.cardColors(containerColor = colorScheme.surface),
+            shape = RoundedCornerShape(10.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                Text(
-                    text = "TARGET RECIPIENT PUBLIC KEY / NODE ID",
-                    color = Color(0xFF64B5F6),
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "RECIPIENT",
+                        color = colorScheme.primary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp
+                    )
+                    Text(
+                        text = if (recipientInput.isBlank()) "MODE: BROADCAST" else "MODE: DIRECT",
+                        color = if (recipientInput.isBlank()) Color(0xFFE65100) else Color(0xFF2E7D32),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedTextField(
                     value = recipientInput,
                     onValueChange = { recipientInput = it },
                     placeholder = {
                         Text(
-                            text = "Paste 64-hex pubkey or Node ID (empty for broadcast)",
-                            color = Color(0xFF78909C),
+                            text = "Leave blank to broadcast to all nodes, or enter Node ID",
+                            color = colorScheme.onSurfaceVariant,
                             fontSize = 12.sp
                         )
                     },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        focusedBorderColor = Color(0xFF42A5F5),
-                        unfocusedBorderColor = Color(0xFF2E3D52)
+                        focusedTextColor = colorScheme.onSurface,
+                        unfocusedTextColor = colorScheme.onSurface,
+                        focusedBorderColor = colorScheme.primary,
+                        unfocusedBorderColor = colorScheme.outline
                     )
                 )
             }
@@ -116,7 +128,7 @@ fun ChatScreen(
             ) {
                 Text(
                     text = "No mesh messages yet.\nEnter a message below to broadcast or transmit via DTN store-carry-forward.",
-                    color = Color(0xFF78909C),
+                    color = colorScheme.onSurfaceVariant,
                     fontSize = 13.sp,
                     fontFamily = FontFamily.Monospace,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -145,17 +157,17 @@ fun ChatScreen(
                 value = messageText,
                 onValueChange = { messageText = it },
                 placeholder = {
-                    Text("Type encrypted mesh packet...", color = Color(0xFF78909C), fontSize = 13.sp)
+                    Text("Type mesh message...", color = colorScheme.onSurfaceVariant, fontSize = 13.sp)
                 },
                 modifier = Modifier.weight(1f),
                 shape = RoundedCornerShape(24.dp),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    focusedBorderColor = Color(0xFF64B5F6),
-                    unfocusedBorderColor = Color(0xFF2C394B),
-                    focusedContainerColor = Color(0xFF161F2E),
-                    unfocusedContainerColor = Color(0xFF161F2E)
+                    focusedTextColor = colorScheme.onSurface,
+                    unfocusedTextColor = colorScheme.onSurface,
+                    focusedBorderColor = colorScheme.primary,
+                    unfocusedBorderColor = colorScheme.outline,
+                    focusedContainerColor = colorScheme.surface,
+                    unfocusedContainerColor = colorScheme.surface
                 )
             )
 
@@ -169,7 +181,7 @@ fun ChatScreen(
                     }
                 },
                 shape = RoundedCornerShape(24.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1976D2)),
+                colors = ButtonDefaults.buttonColors(containerColor = colorScheme.primary),
                 modifier = Modifier.size(52.dp),
                 contentPadding = PaddingValues(0.dp)
             ) {
@@ -187,6 +199,7 @@ fun ChatScreen(
 @Composable
 fun MessageBubble(message: DeadNetMessage) {
     val isOut = message.isOutgoing
+    val colorScheme = MaterialTheme.colorScheme
     val timeFormatted = SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(Date(message.createdAt))
 
     Column(
@@ -197,11 +210,12 @@ fun MessageBubble(message: DeadNetMessage) {
             shape = RoundedCornerShape(12.dp),
             colors = CardDefaults.cardColors(
                 containerColor = when {
-                    message.isBroadcast -> Color(0xFF4A121A) // Alert red
-                    isOut -> Color(0xFF1E3A5F) // Outgoing blue
-                    else -> Color(0xFF1B2433) // Incoming dark slate
+                    message.isBroadcast -> if (isOut) Color(0xFFE3F2FD) else Color(0xFFFFF3E0)
+                    isOut -> colorScheme.primary.copy(alpha = 0.15f)
+                    else -> colorScheme.surfaceVariant
                 }
             ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
             modifier = Modifier.fillMaxWidth(0.92f)
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
@@ -213,14 +227,14 @@ fun MessageBubble(message: DeadNetMessage) {
                 ) {
                     Text(
                         text = if (isOut) "TO: ${message.recipientNodeId}" else "FROM: ${message.senderNodeId}",
-                        color = Color(0xFF90CAF9),
+                        color = colorScheme.primary,
                         fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
                         text = timeFormatted,
-                        color = Color(0xFFB0BEC5),
+                        color = colorScheme.onSurfaceVariant,
                         fontSize = 10.sp
                     )
                 }
@@ -231,22 +245,23 @@ fun MessageBubble(message: DeadNetMessage) {
                 if (message.decryptedText != null) {
                     Text(
                         text = message.decryptedText,
-                        color = Color.White,
+                        color = colorScheme.onSurface,
                         fontSize = 14.sp,
-                        lineHeight = 18.sp
+                        lineHeight = 18.sp,
+                        fontWeight = FontWeight.Medium
                     )
                 } else {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
                             imageVector = Icons.Default.Lock,
                             contentDescription = null,
-                            tint = Color(0xFFFFB74D),
+                            tint = Color(0xFFF57C00),
                             modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = "SEALED CIPHERTEXT (${message.ciphertext.size} bytes)",
-                            color = Color(0xFFFFCC80),
+                            color = colorScheme.onSurfaceVariant,
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace
                         )
@@ -261,13 +276,11 @@ fun MessageBubble(message: DeadNetMessage) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // DTN delivery status badge
                     DeliveryStatusBadge(status = message.deliveryStatus, hops = message.hopCount)
 
-                    // Tokens & Hops info
                     Text(
                         text = "Tokens: ${message.tokensRemaining} • Hops: ${message.hopCount}",
-                        color = Color(0xFF90A4AE),
+                        color = colorScheme.onSurfaceVariant,
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace
                     )
@@ -282,20 +295,20 @@ fun DeliveryStatusBadge(status: DeliveryStatus, hops: Int) {
     val (label, bg, fg, icon) = when (status) {
         DeliveryStatus.DELIVERED -> Quadruple(
             "DELIVERED (ACK)",
-            Color(0xFF1B5E20),
-            Color(0xFF81C784),
+            Color(0xFFE8F5E9),
+            Color(0xFF2E7D32),
             Icons.Default.CheckCircle
         )
         DeliveryStatus.CARRIED -> Quadruple(
             "CARRIED (Hops: $hops)",
+            Color(0xFFFFF3E0),
             Color(0xFFE65100),
-            Color(0xFFFFB74D),
             Icons.Default.Sync
         )
         DeliveryStatus.STORED_LOCALLY -> Quadruple(
             "STORED_LOCALLY",
-            Color(0xFF263238),
-            Color(0xFF90A4AE),
+            Color(0xFFECEFF1),
+            Color(0xFF546E7A),
             Icons.Default.HourglassTop
         )
     }
