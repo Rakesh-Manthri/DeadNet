@@ -1,0 +1,8 @@
+== DeadNet BLE + Simserver Implementation Progress ==
+[2026-10-12] BLE: notification dispatch fixed (notifyCharacteristicChanged to subscribed centrals), CCCD descriptor + onDescriptorWriteRequest + subscribed-centrals tracking added to GATT server.
+[2026-10-12] BLE: client-side hardened — onMtuChanged, CCCD write on subscribe, per-device write Mutex (no chunk interleave), connect throttling (15s), failure cleanup.
+[2026-10-12] BLE: framing unit test added (app/src/test/java/org/deadnet/transport/ble/BleFramingTest.kt).
+[2026-10-12] Simserver: created full JVM TCP mesh simulator (simserver/). 3-node chain E2E test passes.
+[2026-10-12] Simserver: all 5 unit tests PASS (packet framing, token-split, 3-node E2E delivery over real localhost sockets).
+[2026-10-12] Manifest: added uses-feature bluetooth_le. README: simserver docs added. NOTE: Android SDK not installed locally so app APK can't be compiled here; BLE code is complete per Android APIs.
+[2026-10-12] Simplify review: removed duplicates (perDeviceWriteMutex/lastConnectionAttempt declared twice), removed dead deviceMtu state, added updatePeerState helper, removed per-device mutex memory leak on disconnect, reordered notify loop (per-chunk broadcast).

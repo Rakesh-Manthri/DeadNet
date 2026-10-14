@@ -117,6 +117,59 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ---
 
+## 🧪 Localhost Simulation Server
+
+`simserver/` is a **standalone JVM TCP simulation** of the DeadNet mesh routing layer. Instead of physical devices and Wi-Fi Direct/BLE transports, it spins up simulated nodes that talk to each other over **real localhost sockets**, so you can exercise the DTN **Spray-and-Wait** store-carry-forward routing logic (token replication, buffering, hop limits, ACK returns) from your terminal — no phones required.
+
+It is deliberately a **separate Gradle project** with its **own** `gradlew` wrapper (JDK 17), so it never interferes with the Android AGP build in the repo root.
+
+### Prerequisites
+
+- **JDK 17** on `PATH` (or `JAVA_HOME` set to a JDK 17)
+- Network on **localhost**/127.0.0.1 (loopback) — no external connectivity is used
+
+### Running
+
+```bash
+cd simserver
+
+# Windows
+.\gradlew.bat run --args="3"
+# macOS / Linux
+./gradlew run --args="3"
+```
+
+The `--args` value is the number of simulated nodes to start (e.g. `3`).
+
+### Interactive commands
+
+Once the server is running, type any of the following at the prompt:
+
+| Command | Description |
+|---|---|
+| `nodes` | List the simulated nodes and their live TCP ports |
+| `link 1 2` | Bring up a direct link between node 1 and node 2 |
+| `send 1 3 hello` | Send the message `hello` from node 1 to node 3 over the mesh |
+| `state` | Dump the current routing state (buffers, tokens, hop counts) |
+| `quit` | Shut down the simulation and exit |
+
+### Tests
+
+```bash
+cd simserver
+
+# Windows
+.\gradlew.bat test
+# macOS / Linux
+./gradlew test
+```
+
+Runs the simserver unit tests.
+
+> **Note:** These commands reflect the interface the simserver was requested to implement. The server source (`simserver/src/main/kotlin/org/deadnet/sim/Main.kt` / `SimServer.kt`) is under active development — if a command differs once implemented, check the source and update this table.
+
+---
+
 ## 📄 Permissions Used
 
 - `NEARBY_WIFI_DEVICES`, `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE` for Wi-Fi Direct peer discovery and sockets.

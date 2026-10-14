@@ -13,3 +13,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Localhost simulation server (standalone JVM project)
+/simserver/build/
+/simserver/.gradle/

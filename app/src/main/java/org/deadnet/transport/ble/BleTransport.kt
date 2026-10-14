@@ -18,7 +18,6 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -33,6 +32,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.deadnet.crypto.DeadNetCrypto
 import org.deadnet.crypto.toHexString
 import org.deadnet.protocol.DeadNetPacket
@@ -86,6 +87,17 @@ class BleTransport(
     // Track active client GATT connections keyed by device address
     private val connectedGattClients = ConcurrentHashMap<String, BluetoothGatt>()
 
+    // Serializes chunked writes per device so concurrent sendPacket calls to the
+    // same peer cannot interleave chunks and corrupt a packet.
+    private val perDeviceWriteMutex = ConcurrentHashMap<String, Mutex>()
+
+    // Throttle auto-connect attempts: device address -> last attempt timestamp.
+    private val lastConnectionAttempt = ConcurrentHashMap<String, Long>()
+    private val CONNECTION_ATTEMPT_INTERVAL_MS = 15_000L
+
+    // Track subscribed centrals (CCCD-enabled) for server notification dispatch
+    private val subscribedCentrals = mutableSetOf<String>()
+
     // Reassembly buffers for incoming chunked packets keyed by remote device address
     private val incomingBuffers = ConcurrentHashMap<String, ByteArrayOutputStream>()
 
@@ -93,6 +105,14 @@ class BleTransport(
     private val discoveredPeersMap = ConcurrentHashMap<String, PeerNode>()
 
     private var scanJob: Job? = null
+
+    // BLE GATT connects MUST be issued on the main thread (binder callbacks run
+    // on other threads), otherwise connectGatt can silently fail or never connect.
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    // Bounded retry when Bluetooth is off at start(), so BLE doesn't spin forever.
+    private var adapterWaitAttempt = 0
+    private val MAX_ADAPTER_WAIT = 5
 
     @SuppressLint("MissingPermission")
     override fun start() {
@@ -105,8 +125,22 @@ class BleTransport(
 
         if (bluetoothAdapter == null || !bluetoothAdapter!!.isEnabled) {
             log("Bluetooth adapter disabled or unavailable. BLE transport in standby.")
+            // Retry shortly — the user may toggle Bluetooth on right after the
+            // service starts, and BLE would otherwise stay dead forever. Guard
+            // so we don't spin an unbounded retry loop when the adapter stays off.
+            adapterWaitAttempt++
+            if (adapterWaitAttempt <= MAX_ADAPTER_WAIT) {
+                scope.launch {
+                    delay(3000)
+                    if (_isRunning) {
+                        _isRunning = false // allow start() to re-run setup
+                        start()
+                    }
+                }
+            }
             return
         }
+        adapterWaitAttempt = 0
 
         leAdvertiser = bluetoothAdapter?.bluetoothLeAdvertiser
         leScanner = bluetoothAdapter?.bluetoothLeScanner
@@ -158,24 +192,32 @@ class BleTransport(
         val packetBytes = packet.toByteArray()
         log("Queueing packet ${packet.msgId} (${packetBytes.size} bytes) for BLE dispatch")
 
-        // 1. Notify connected central devices via GATT server
+        // 1. Notify connected central devices via GATT server (peripheral → central)
         val char = packetCharacteristic
         val server = gattServer
         if (server != null && char != null) {
             val chunks = sliceIntoChunks(packetBytes, BleConstants.DEFAULT_BLE_CHUNK_SIZE)
+            // Broadcast each chunk to every subscribed central before moving to the
+            // next chunk, so latency doesn't scale linearly with the number of centrals.
+            val centrals = subscribedCentrals.toList()
             for (chunk in chunks) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    // Send notification to connected central devices
-                    // Server handles notification dispatch
-                }
                 char.value = chunk
+                for (addr in centrals) {
+                    val device = bluetoothAdapter?.getRemoteDevice(addr) ?: continue
+                    server.notifyCharacteristicChanged(device, char, false)
+                }
+                kotlinx.coroutines.delay(15) // Inter-chunk pacing
             }
         }
 
-        // 2. Dispatch to connected GATT client connections
+        // 2. Dispatch to connected GATT client connections (central → peripheral)
+        //    Serialized per device so concurrent sendPacket calls never interleave
+        //    this packet's chunks with another packet's chunks.
         connectedGattClients.values.forEach { gatt ->
+            val addr = gatt.device.address
+            val mutex = perDeviceWriteMutex.getOrPut(addr) { Mutex() }
             scope.launch(Dispatchers.IO) {
-                sendPacketToGatt(gatt, packetBytes)
+                mutex.withLock { sendPacketToGatt(gatt, packetBytes) }
             }
         }
 
@@ -221,6 +263,7 @@ class BleTransport(
                     onHandshakeReady?.invoke()
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     log("BLE Central disconnected: $addr")
+                    subscribedCentrals.remove(addr)
                     incomingBuffers.remove(addr)
                 }
             }
@@ -241,6 +284,35 @@ class BleTransport(
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
                 }
             }
+
+            override fun onDescriptorWriteRequest(
+                device: BluetoothDevice,
+                requestId: Int,
+                descriptor: BluetoothGattDescriptor,
+                preparedWrite: Boolean,
+                responseNeeded: Boolean,
+                offset: Int,
+                value: ByteArray?
+            ) {
+                // Handle CCCD subscription for notifications
+                if (descriptor.uuid == BleConstants.CCCD_UUID && value != null && value.size >= 2) {
+                    val enabled = (value[0].toInt() and 0xFF) == 0x01
+                    val addr = device.address
+                    if (enabled) {
+                        subscribedCentrals.add(addr)
+                        log("Central $addr subscribed to notifications")
+                    } else {
+                        subscribedCentrals.remove(addr)
+                    }
+                }
+                if (responseNeeded) {
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
+                }
+            }
+
+            override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+                log("MTU updated for ${device.address}: $mtu")
+            }
         })
 
         // Build DeadNet Service & Characteristic
@@ -249,7 +321,7 @@ class BleTransport(
             BluetoothGattService.SERVICE_TYPE_PRIMARY
         )
 
-        packetCharacteristic = BluetoothGattCharacteristic(
+        val characteristic = BluetoothGattCharacteristic(
             BleConstants.PACKET_CHARACTERISTIC_UUID,
             BluetoothGattCharacteristic.PROPERTY_WRITE or
                     BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
@@ -257,8 +329,16 @@ class BleTransport(
                     BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_WRITE or BluetoothGattCharacteristic.PERMISSION_READ
         )
+        packetCharacteristic = characteristic
 
-        service.addCharacteristic(packetCharacteristic)
+        // Add CCCD descriptor so centrals can subscribe to notifications
+        val cccdDescriptor = BluetoothGattDescriptor(
+            BleConstants.CCCD_UUID,
+            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+        )
+        characteristic.addDescriptor(cccdDescriptor)
+
+        service.addCharacteristic(characteristic)
         gattServer?.addService(service)
         log("BLE GATT Server initialized with Service: ${BleConstants.SERVICE_UUID}")
     }
@@ -365,32 +445,34 @@ class BleTransport(
         val addr = device.address
         if (connectedGattClients.containsKey(addr)) return
 
+        // Throttle auto-connect so a persistently-scanning device doesn't spam
+        // connect attempts while the link is mid-setup or repeatedly failing.
+        val now = System.currentTimeMillis()
+        val last = lastConnectionAttempt[addr] ?: 0L
+        if (now - last < CONNECTION_ATTEMPT_INTERVAL_MS) return
+        lastConnectionAttempt[addr] = now
+
         log("Connecting BLE GATT to $addr (${device.name ?: "Unknown"})...")
 
         val gattCallback = object : BluetoothGattCallback() {
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                val addr = gatt.device.address
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        log("BLE GATT connection reported status=$status; tearing down $addr")
+                        cleanupGattClient(addr, gatt)
+                        return
+                    }
                     log("Connected to BLE GATT server: $addr. Discovering services...")
                     connectedGattClients[addr] = gatt
                     gatt.requestMtu(256)
                     gatt.discoverServices()
 
-                    // Update status in peers list
-                    discoveredPeersMap[addr]?.let {
-                        discoveredPeersMap[addr] = it.copy(isConnected = true, statusText = "CONNECTED")
-                        _peersFlow.value = discoveredPeersMap.values.toList()
-                    }
+                    updatePeerState(addr, connected = true)
                     onHandshakeReady?.invoke()
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     log("Disconnected from BLE GATT: $addr")
-                    connectedGattClients.remove(addr)
-                    incomingBuffers.remove(addr)
-                    try { gatt.close() } catch (_: Exception) {}
-
-                    discoveredPeersMap[addr]?.let {
-                        discoveredPeersMap[addr] = it.copy(isConnected = false, statusText = "AVAILABLE")
-                        _peersFlow.value = discoveredPeersMap.values.toList()
-                    }
+                    cleanupGattClient(addr, gatt)
                 }
             }
 
@@ -400,7 +482,33 @@ class BleTransport(
                     val service = gatt.getService(BleConstants.SERVICE_UUID) ?: return
                     val char = service.getCharacteristic(BleConstants.PACKET_CHARACTERISTIC_UUID) ?: return
                     gatt.setCharacteristicNotification(char, true)
+                    // Also write the CCCD descriptor so the remote GATT server knows
+                    // we want notifications (setCharacteristicNotification alone is
+                    // often insufficient for the peripheral to enable delivery).
+                    val cccd = char.getDescriptor(BleConstants.CCCD_UUID)
+                    if (cccd != null) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            @Suppress("DEPRECATION")
+                            gatt.writeDescriptor(cccd)
+                        }
+                    }
                 }
+            }
+
+            override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+                log("Client MTU updated for ${gatt.device.address}: $mtu (status=$status)")
+            }
+
+            override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+                log("Client write to $addr: ${characteristic.uuid} status=$status")
+            }
+
+            override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                log("Client CCCD write to $addr: ${descriptor.uuid} status=$status")
             }
 
             override fun onCharacteristicChanged(
@@ -416,17 +524,47 @@ class BleTransport(
             }
         }
 
-        try {
-            val gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-            } else {
-                device.connectGatt(context, false, gattCallback)
+        // connectGatt must run on the main thread. The scan callback executes on a
+        // binder thread, so hop to the main Looper before connecting.
+        mainHandler.post {
+            try {
+                val gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                } else {
+                    device.connectGatt(context, false, gattCallback)
+                }
+                if (gatt == null) {
+                    // Failed to start the connect; allow a retry on a later scan.
+                    lastConnectionAttempt.remove(addr)
+                    log("connectGatt returned null for $addr")
+                }
+            } catch (e: Exception) {
+                lastConnectionAttempt.remove(addr)
+                log("connectGatt error for $addr: ${e.message}")
             }
-            if (gatt != null) {
-                connectedGattClients[addr] = gatt
-            }
-        } catch (e: Exception) {
-            log("connectGatt error for $addr: ${e.message}")
+        }
+    }
+
+    /** Remove a client GATT entry and safely close/unregister it. */
+    private fun cleanupGattClient(addr: String, gatt: BluetoothGatt) {
+        connectedGattClients.remove(addr)
+        perDeviceWriteMutex.remove(addr)
+        incomingBuffers.remove(addr)
+        lastConnectionAttempt.remove(addr)
+        try { gatt.disconnect() } catch (_: Exception) {}
+        try { gatt.close() } catch (_: Exception) {}
+
+        updatePeerState(addr, connected = false)
+    }
+
+    /** Refresh a discovered peer's connection status and re-emit the peers flow. */
+    private fun updatePeerState(addr: String, connected: Boolean) {
+        discoveredPeersMap[addr]?.let {
+            discoveredPeersMap[addr] = it.copy(
+                isConnected = connected,
+                statusText = if (connected) "CONNECTED" else "AVAILABLE"
+            )
+            _peersFlow.value = discoveredPeersMap.values.toList()
         }
     }
 
@@ -445,14 +583,15 @@ class BleTransport(
     @SuppressLint("MissingPermission")
     private fun startScanning() {
         val scanner = leScanner ?: return
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(BleConstants.SERVICE_UUID))
-            .build()
+        // No service-UUID scan filter: some BLE stacks omit the 128-bit UUID from
+        // the top-level advertising field set, which makes an exact UUID filter
+        // silently match nothing. We filter instead in handleScanResult by
+        // checking serviceUuids (and fall back to service data) on each result.
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
         try {
-            scanner.startScan(listOf(filter), settings, scanCallback)
+            scanner.startScan(null, settings, scanCallback)
         } catch (e: Exception) {
             log("startScan error: ${e.message}")
         }
