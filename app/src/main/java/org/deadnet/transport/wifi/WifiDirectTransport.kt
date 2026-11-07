@@ -227,6 +227,16 @@ class WifiDirectTransport(
                     log("P2P Connect failed for $deviceAddress ($desc)")
                     isConnectingOrConnected.set(false)
                     connectionTimeoutJob?.cancel()
+                    if (reason == WifiP2pManager.BUSY) {
+                        scope.launch {
+                            val jitter = kotlin.random.Random.nextLong(1500L, 3500L)
+                            log("Framework BUSY connecting to $deviceAddress. Retrying with jitter in ${jitter}ms...")
+                            delay(jitter)
+                            if (_isRunning && !isConnectingOrConnected.get()) {
+                                connectToDevice(deviceAddress)
+                            }
+                        }
+                    }
                 }
             })
         } catch (e: SecurityException) {

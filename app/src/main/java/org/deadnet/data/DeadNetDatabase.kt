@@ -6,14 +6,15 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [DeadNetMessage::class, SeenPacket::class],
-    version = 1,
+    entities = [DeadNetMessage::class, SeenPacket::class, PeerContact::class],
+    version = 2,
     exportSchema = false
 )
 abstract class DeadNetDatabase : RoomDatabase() {
 
     abstract fun deadNetMessageDao(): DeadNetMessageDao
     abstract fun seenPacketDao(): SeenPacketDao
+    abstract fun peerContactDao(): PeerContactDao
 
     companion object {
         @Volatile

@@ -1,5 +1,6 @@
 package org.deadnet.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,17 +8,21 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import org.deadnet.MainActivity
 import org.deadnet.crypto.DeadNetCrypto
+import org.deadnet.crypto.KeyStoreManager
+import org.deadnet.crypto.toHexString
 import org.deadnet.data.DeadNetDatabase
 import org.deadnet.routing.DtnRoutingEngine
 import org.deadnet.routing.FileTransferManager
@@ -40,6 +45,7 @@ class DeadNetMeshService : Service() {
 
         private const val PREFS_NAME = "deadnet_prefs"
         private const val PREF_PRIV_KEY = "priv_key_hex"
+        private const val PREF_ENCRYPTED_PRIV_KEY = "encrypted_priv_key_hex"
         private const val PREF_PUB_KEY = "pub_key_hex"
 
         private val notificationIdCounter = AtomicInteger(2000)
@@ -137,12 +143,31 @@ class DeadNetMeshService : Service() {
 
         val notification = buildForegroundNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val hasBluetoothConnect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            } else true
+
             val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                if (hasBluetoothConnect) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                }
             } else {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
             }
-            startForeground(NOTIFICATION_ID, notification, serviceType)
+
+            try {
+                startForeground(NOTIFICATION_ID, notification, serviceType)
+            } catch (_: SecurityException) {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                    } else {
+                        startForeground(NOTIFICATION_ID, notification)
+                    }
+                } catch (_: Exception) {}
+            }
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -235,23 +260,58 @@ class DeadNetMeshService : Service() {
 
     private fun loadOrCreateKeyPair(): DeadNetCrypto.KeyPair {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val privHex = prefs.getString(PREF_PRIV_KEY, null)
+        val encryptedPrivHex = prefs.getString(PREF_ENCRYPTED_PRIV_KEY, null)
         val pubHex = prefs.getString(PREF_PUB_KEY, null)
 
-        if (privHex != null && pubHex != null) {
+        // 1. Try loading hardware-encrypted private key
+        if (encryptedPrivHex != null && pubHex != null) {
             try {
+                val encryptedBytes = DeadNetCrypto.hexToBytes(encryptedPrivHex)
+                val decryptedPrivKey = KeyStoreManager.decrypt(encryptedBytes)
                 return DeadNetCrypto.KeyPair(
                     publicKey = DeadNetCrypto.hexToBytes(pubHex),
-                    privateKey = DeadNetCrypto.hexToBytes(privHex)
+                    privateKey = decryptedPrivKey
                 )
             } catch (_: Exception) {}
         }
 
+        // 2. Migration from legacy plaintext private key
+        val legacyPrivHex = prefs.getString(PREF_PRIV_KEY, null)
+        if (legacyPrivHex != null && pubHex != null) {
+            try {
+                val privBytes = DeadNetCrypto.hexToBytes(legacyPrivHex)
+                val encrypted = KeyStoreManager.encrypt(privBytes)
+                prefs.edit()
+                    .putString(PREF_ENCRYPTED_PRIV_KEY, encrypted.toHexString())
+                    .remove(PREF_PRIV_KEY)
+                    .apply()
+                return DeadNetCrypto.KeyPair(
+                    publicKey = DeadNetCrypto.hexToBytes(pubHex),
+                    privateKey = privBytes
+                )
+            } catch (_: Exception) {}
+        }
+
+        // 3. Generate fresh X25519 identity key and encrypt with AndroidKeyStore
         val generated = DeadNetCrypto.generateKeyPair()
+        val encrypted = KeyStoreManager.encrypt(generated.privateKey)
         prefs.edit()
-            .putString(PREF_PRIV_KEY, DeadNetCrypto.run { generated.privateKey.toHexString() })
-            .putString(PREF_PUB_KEY, DeadNetCrypto.run { generated.publicKey.toHexString() })
+            .putString(PREF_ENCRYPTED_PRIV_KEY, encrypted.toHexString())
+            .putString(PREF_PUB_KEY, generated.publicKey.toHexString())
+            .remove(PREF_PRIV_KEY)
             .apply()
         return generated
+    }
+
+    /**
+     * Wipes all identity keys from AndroidKeyStore and SharedPreferences (Panic Wipe).
+     */
+    fun wipeIdentity(): DeadNetCrypto.KeyPair {
+        KeyStoreManager.wipeMasterKey()
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().clear().apply()
+        val freshKeyPair = loadOrCreateKeyPair()
+        keyPair = freshKeyPair
+        return freshKeyPair
     }
 }

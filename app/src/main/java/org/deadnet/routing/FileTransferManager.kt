@@ -40,7 +40,9 @@ class FileTransferManager(
     private val scope: CoroutineScope
 ) {
     companion object {
-        const val CHUNK_SIZE_BYTES = 16 * 1024  // 16 KB per chunk
+        const val WIFI_CHUNK_SIZE_BYTES = 16 * 1024  // 16 KB per chunk for high-speed Wi-Fi Direct socket stream
+        const val BLE_CHUNK_SIZE_BYTES = 480         // 480 B per chunk for reliable BLE GATT transmission
+        const val CHUNK_SIZE_BYTES = WIFI_CHUNK_SIZE_BYTES
         const val SESSION_ID_LEN = 36  // UUID string length
     }
 
@@ -84,7 +86,12 @@ class FileTransferManager(
 
                 val sessionId = UUID.randomUUID().toString()
                 val totalSize = bytes.size.toLong()
-                val chunks = bytes.toChunks(CHUNK_SIZE_BYTES)
+                val effectiveChunkSize = if (peer.transportType == org.deadnet.transport.TransportType.BLE) {
+                    BLE_CHUNK_SIZE_BYTES
+                } else {
+                    WIFI_CHUNK_SIZE_BYTES
+                }
+                val chunks = bytes.toChunks(effectiveChunkSize)
                 val totalChunks = chunks.size
 
                 // Record session
@@ -132,14 +139,14 @@ class FileTransferManager(
                     )
                     transports.forEach { it.sendPacket(chunkPacket) }
 
-                    val sent = ((index + 1).toLong() * CHUNK_SIZE_BYTES).coerceAtMost(totalSize)
+                    val sent = ((index + 1).toLong() * effectiveChunkSize).coerceAtMost(totalSize)
                     updateSession(session.copy(
                         bytesTransferred = sent,
                         isComplete = (index == totalChunks - 1)
                     ))
 
-                    // Brief 10ms yield to prevent TCP buffer congestion
-                    delay(10)
+                    // Brief pacing to prevent buffer overflow (extra pacing for BLE)
+                    delay(if (peer.transportType == org.deadnet.transport.TransportType.BLE) 25L else 10L)
                 }
             } catch (e: Exception) {
                 onError("File transfer failed: ${e.message}")
@@ -180,7 +187,7 @@ class FileTransferManager(
             buffer[chunkIndex] = chunkData
             session.receivedChunks.add(chunkIndex)
 
-            val receivedBytes = session.receivedChunks.size.toLong() * CHUNK_SIZE_BYTES
+            val receivedBytes = buffer.filterNotNull().sumOf { it.size.toLong() }
             val updated = session.copy(bytesTransferred = receivedBytes.coerceAtMost(session.totalSize))
             updateSession(updated)
 

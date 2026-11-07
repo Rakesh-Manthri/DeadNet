@@ -21,15 +21,24 @@ import org.deadnet.crypto.toHexString
 import org.deadnet.data.DeadNetDatabase
 import org.deadnet.data.DeadNetMessage
 import org.deadnet.data.FileTransferSession
+import org.deadnet.data.PeerContact
+import org.deadnet.data.SettingsManager
 import org.deadnet.protocol.DeadNetPacket
 import org.deadnet.service.DeadNetMeshService
 import org.deadnet.transport.PeerNode
+import org.deadnet.transport.TransportType
 import java.util.UUID
 
 class DeadNetViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = DeadNetDatabase.getDatabase(application)
     private var meshService: DeadNetMeshService? = null
+
+    val settingsManager = SettingsManager(application)
+
+    val contacts: StateFlow<List<PeerContact>> = db.peerContactDao()
+        .getAllContactsFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val messages: StateFlow<List<DeadNetMessage>> = db.deadNetMessageDao()
         .getAllMessagesFlow()
@@ -57,7 +66,7 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
     private val _selectedConversationId = MutableStateFlow<String?>(null)
     val selectedConversationId: StateFlow<String?> = _selectedConversationId.asStateFlow()
 
-    val myDeviceName: String = "${android.os.Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${android.os.Build.MODEL}"
+    val myDeviceName: StateFlow<String> = settingsManager.nodeDisplayName
 
     private val _fileTransferSessions = MutableStateFlow<Map<String, FileTransferSession>>(emptyMap())
     val fileTransferSessions: StateFlow<Map<String, FileTransferSession>> = _fileTransferSessions.asStateFlow()
@@ -71,6 +80,11 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
             meshService?.let { s ->
                 _ownNodeId.value = s.keyPair.nodeId
                 _ownPubKey.value = s.keyPair.publicKey.toHexString()
+
+                // Sync user settings with routing engine
+                s.routingEngine.customNodeName = settingsManager.nodeDisplayName.value
+                s.routingEngine.configuredTokenQuota = settingsManager.tokenQuota.value
+                s.routingEngine.configuredTtlSeconds = settingsManager.defaultTtlHours.value * 3600L
 
                 // Bind discovered physical Wi-Fi and BLE peers flows
                 viewModelScope.launch {
@@ -165,7 +179,10 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
             }
             _selectedConversationId.value = targetConvId
         } else {
-            // Peer not yet handshaked — subscribe and wait for them to appear in knownPeers
+            // Peer not yet handshaked — open immediately under temp ID and prompt handshake
+            val tempId = peer.address.ifBlank { peer.id }
+            _selectedConversationId.value = tempId
+            meshService?.routingEngine?.broadcastHandshake()
             viewModelScope.launch {
                 _knownPeers.collect { knownList ->
                     val found = knownList.find { kp ->
@@ -340,15 +357,24 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun connectToPeer(peer: PeerNode) {
-        meshService?.wifiTransport?.connectToDevice(peer.address)
+        if (peer.transportType == TransportType.BLE) {
+            meshService?.bleTransport?.connectToDevice(peer.address)
+        } else {
+            meshService?.wifiTransport?.connectToDevice(peer.address)
+        }
     }
 
-    fun disconnectPeer() {
-        meshService?.wifiTransport?.disconnectAndResumeDiscovery()
+    fun disconnectPeer(peer: PeerNode? = null) {
+        if (peer?.transportType == TransportType.BLE) {
+            meshService?.bleTransport?.disconnectDevice(peer.address)
+        } else {
+            meshService?.wifiTransport?.disconnectAndResumeDiscovery()
+        }
     }
 
     fun triggerScan() {
         meshService?.wifiTransport?.triggerManualScan()
+        meshService?.bleTransport?.triggerManualScan()
     }
 
     fun sendFile(fileUri: Uri, conversationId: String) {
@@ -364,6 +390,62 @@ class DeadNetViewModel(application: Application) : AndroidViewModel(application)
                 s.routingEngine.log("[FileTransfer] Error: $errorMsg")
             }
         )
+    }
+
+    fun setContactAlias(nodeId: String, alias: String, notes: String = "") {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.peerContactDao().upsert(
+                PeerContact(
+                    nodeId = nodeId,
+                    alias = alias.trim(),
+                    notes = notes.trim()
+                )
+            )
+        }
+    }
+
+    fun deleteContact(nodeId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.peerContactDao().deleteContact(nodeId)
+        }
+    }
+
+    fun setNodeDisplayName(name: String) {
+        settingsManager.setNodeDisplayName(name)
+        meshService?.routingEngine?.customNodeName = name
+    }
+
+    fun setDefaultTtlHours(hours: Int) {
+        settingsManager.setDefaultTtlHours(hours)
+        meshService?.routingEngine?.configuredTtlSeconds = hours * 3600L
+    }
+
+    fun setTokenQuota(quota: Int) {
+        settingsManager.setTokenQuota(quota)
+        meshService?.routingEngine?.configuredTokenQuota = quota
+    }
+
+    fun setScanProfile(profile: String) {
+        settingsManager.setScanProfile(profile)
+    }
+
+    fun setThemeMode(mode: String) {
+        settingsManager.setThemeMode(mode)
+    }
+
+    /**
+     * Emergency Panic Wipe: Destroys all database records, active keys, and replaces identity.
+     */
+    fun panicWipe() {
+        viewModelScope.launch(Dispatchers.IO) {
+            meshService?.routingEngine?.panicWipe()
+            val newKey = meshService?.wipeIdentity()
+            if (newKey != null) {
+                _ownNodeId.value = newKey.nodeId
+                _ownPubKey.value = newKey.publicKey.toHexString()
+            }
+            _selectedConversationId.value = null
+        }
     }
 
     override fun onCleared() {

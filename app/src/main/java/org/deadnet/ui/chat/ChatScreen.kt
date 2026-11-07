@@ -10,6 +10,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.FileProvider
 import java.io.File
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -36,6 +38,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
@@ -47,6 +50,11 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Warning
+import org.deadnet.crypto.DeadNetCrypto
+import org.deadnet.data.PeerContact
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -72,6 +80,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -79,6 +88,7 @@ import androidx.compose.ui.unit.sp
 import org.deadnet.data.DeadNetMessage
 import org.deadnet.data.FileTransferSession
 import org.deadnet.transport.PeerNode
+import org.deadnet.transport.TransportType
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -87,7 +97,8 @@ data class ConversationSummary(
     val conversationId: String,
     val displayName: String,
     val isOnline: Boolean,
-    val lastMessage: DeadNetMessage?
+    val lastMessage: DeadNetMessage?,
+    val transportType: TransportType? = null
 )
 
 @Composable
@@ -96,20 +107,26 @@ fun ChatScreen(
     knownPeers: List<PeerNode>,
     selectedConversationId: String?,
     fileTransferSessions: Map<String, FileTransferSession> = emptyMap(),
+    contacts: List<PeerContact> = emptyList(),
     onSelectConversation: (String?) -> Unit,
     onSendMessage: (conversationId: String, text: String) -> Unit,
     onSendFile: (conversationId: String, uri: Uri) -> Unit = { _, _ -> },
     onDeleteMessage: (msgId: String) -> Unit,
     onDeleteConversation: (conversationId: String) -> Unit,
     onClearAllMessages: () -> Unit,
+    onPanicWipe: () -> Unit = {},
+    onSetContactAlias: (nodeId: String, alias: String, notes: String) -> Unit = { _, _, _ -> },
+    onDeleteContact: (nodeId: String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     if (selectedConversationId == null) {
         ConversationListView(
             messages = messages,
             knownPeers = knownPeers,
+            contacts = contacts,
             onSelectConversation = onSelectConversation,
             onClearAllMessages = onClearAllMessages,
+            onPanicWipe = onPanicWipe,
             modifier = modifier
         )
     } else {
@@ -126,6 +143,7 @@ fun ChatScreen(
             messages = threadMessages,
             knownPeers = knownPeers,
             fileTransferSessions = fileTransferSessions.filter { it.value.peerId == selectedConversationId },
+            contacts = contacts,
             onBack = { onSelectConversation(null) },
             onSendMessage = { text -> onSendMessage(selectedConversationId, text) },
             onSendFile = { uri -> onSendFile(selectedConversationId, uri) },
@@ -134,6 +152,8 @@ fun ChatScreen(
                 onDeleteConversation(selectedConversationId)
                 onSelectConversation(null)
             },
+            onSetContactAlias = onSetContactAlias,
+            onDeleteContact = onDeleteContact,
             modifier = modifier
         )
     }
@@ -146,12 +166,39 @@ fun ChatScreen(
 fun ConversationListView(
     messages: List<DeadNetMessage>,
     knownPeers: List<PeerNode>,
+    contacts: List<PeerContact> = emptyList(),
     onSelectConversation: (String?) -> Unit,
     onClearAllMessages: () -> Unit,
+    onPanicWipe: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
     var showClearAllDialog by remember { mutableStateOf(false) }
+    var showPanicWipeDialog by remember { mutableStateOf(false) }
+
+    if (showPanicWipeDialog) {
+        AlertDialog(
+            onDismissRequest = { showPanicWipeDialog = false },
+            title = { Text("EMERGENCY PANIC WIPE", fontWeight = FontWeight.Bold, color = colorScheme.error) },
+            text = { Text("Are you sure you want to trigger Panic Wipe?\n\nThis will permanently delete all message history, clear routing deduplication, and destroy your cryptographic identity keys from device hardware. This cannot be undone.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onPanicWipe()
+                        showPanicWipeDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = colorScheme.error)
+                ) {
+                    Text("Wipe Everything")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPanicWipeDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     if (showClearAllDialog) {
         AlertDialog(
@@ -178,7 +225,7 @@ fun ConversationListView(
     }
 
     // Deduplicate conversations so each physical peer has exactly ONE entry
-    val directConversations = remember(knownPeers, messages) {
+    val directConversations = remember(knownPeers, messages, contacts) {
         val list = mutableListOf<ConversationSummary>()
         val seenKeys = mutableSetOf<String>()
 
@@ -193,12 +240,16 @@ fun ConversationListView(
             seenKeys.add(peer.nodeId)
             if (peer.address.isNotBlank()) seenKeys.add(peer.address)
 
+            val contact = contacts.find { it.nodeId == peer.nodeId }
+            val name = contact?.alias?.takeIf { it.isNotBlank() } ?: peer.name.ifBlank { "Nearby Mesh Peer" }
+
             list.add(
                 ConversationSummary(
                     conversationId = peer.nodeId,
-                    displayName = peer.name.ifBlank { "Nearby Mesh Peer" },
+                    displayName = name,
                     isOnline = peer.isConnected,
-                    lastMessage = lastMsg
+                    lastMessage = lastMsg,
+                    transportType = peer.transportType
                 )
             )
         }
@@ -214,11 +265,13 @@ fun ConversationListView(
             val lastMsg = convMessages.maxByOrNull { it.createdAt }
             val title = lastMsg?.conversationTitle?.takeIf { !it.startsWith("Node ") && it.isNotBlank() }
                 ?: "Nearby Mesh Peer"
+            val contact = contacts.find { it.nodeId == convId }
+            val resolvedName = contact?.alias?.takeIf { it.isNotBlank() } ?: title
 
             list.add(
                 ConversationSummary(
                     conversationId = convId,
-                    displayName = title,
+                    displayName = resolvedName,
                     isOnline = false,
                     lastMessage = lastMsg
                 )
@@ -255,12 +308,21 @@ fun ConversationListView(
                     fontWeight = FontWeight.Bold
                 )
             }
-            if (messages.isNotEmpty()) {
-                IconButton(onClick = { showClearAllDialog = true }) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (messages.isNotEmpty()) {
+                    IconButton(onClick = { showClearAllDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Clear All Messages",
+                            tint = colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                IconButton(onClick = { showPanicWipeDialog = true }) {
                     Icon(
-                        imageVector = Icons.Default.Delete,
-                        contentDescription = "Clear All Messages",
-                        tint = colorScheme.onSurfaceVariant
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "Emergency Panic Wipe",
+                        tint = colorScheme.error
                     )
                 }
             }
@@ -347,6 +409,7 @@ fun ConversationListView(
                         displayName = summary.displayName,
                         isOnline = summary.isOnline,
                         lastMessage = summary.lastMessage,
+                        transportType = summary.transportType,
                         onClick = { onSelectConversation(summary.conversationId) }
                     )
                 }
@@ -430,6 +493,7 @@ fun PeerConversationCard(
     displayName: String,
     isOnline: Boolean,
     lastMessage: DeadNetMessage?,
+    transportType: TransportType? = null,
     onClick: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -500,6 +564,33 @@ fun PeerConversationCard(
                                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                             )
                         }
+                        if (transportType != null) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = when (transportType) {
+                                    TransportType.BLE -> Color(0xFFE0F2F1)
+                                    TransportType.WIFI_DIRECT -> Color(0xFFE3F2FD)
+                                    TransportType.ULTRASONIC -> Color(0xFFF3E5F5)
+                                }
+                            ) {
+                                Text(
+                                    text = when (transportType) {
+                                        TransportType.BLE -> "BLE"
+                                        TransportType.WIFI_DIRECT -> "Wi-Fi"
+                                        TransportType.ULTRASONIC -> "Audio"
+                                    },
+                                    color = when (transportType) {
+                                        TransportType.BLE -> Color(0xFF00695C)
+                                        TransportType.WIFI_DIRECT -> Color(0xFF1565C0)
+                                        TransportType.ULTRASONIC -> Color(0xFF6A1B9A)
+                                    },
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
                     }
 
                     if (lastMessage != null) {
@@ -535,17 +626,22 @@ fun ConversationThreadView(
     messages: List<DeadNetMessage>,
     knownPeers: List<PeerNode>,
     fileTransferSessions: Map<String, FileTransferSession> = emptyMap(),
+    contacts: List<PeerContact> = emptyList(),
     onBack: () -> Unit,
     onSendMessage: (String) -> Unit,
     onSendFile: (Uri) -> Unit = {},
     onDeleteMessage: (String) -> Unit,
     onDeleteConversation: () -> Unit,
+    onSetContactAlias: (nodeId: String, alias: String, notes: String) -> Unit = { _, _, _ -> },
+    onDeleteContact: (nodeId: String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     var messageText by remember { mutableStateOf("") }
     var showDeleteChatDialog by remember { mutableStateOf(false) }
+    var showVerifyFingerprintDialog by remember { mutableStateOf(false) }
+    var showEditContactDialog by remember { mutableStateOf(false) }
     var messageToDelete by remember { mutableStateOf<DeadNetMessage?>(null) }
     var selectedMessageForAction by remember { mutableStateOf<DeadNetMessage?>(null) }
     val listState = rememberLazyListState()
@@ -556,17 +652,33 @@ fun ConversationThreadView(
         uri?.let { onSendFile(it) }
     }
 
+    val currentContact = remember(contacts, conversationId) { contacts.find { it.nodeId == conversationId } }
+
     // Title determination (No IDs, friendly names only)
     val isBroadcast = conversationId == "BROADCAST"
     val peer = knownPeers.find { it.nodeId == conversationId }
     val title = if (isBroadcast) {
         "Mesh Broadcast"
+    } else if (!currentContact?.alias.isNullOrBlank()) {
+        currentContact!!.alias
     } else {
         peer?.name?.takeIf { !it.startsWith("Node ") && it.isNotBlank() }
             ?: messages.firstOrNull { it.conversationTitle.isNotBlank() && !it.conversationTitle.startsWith("Node ") }?.conversationTitle
             ?: "Nearby Mesh Peer"
     }
-    val subtitle = if (isBroadcast) "Broadcast to All Mesh Nodes" else "End-to-End Encrypted (X25519)"
+    val subtitle = if (isBroadcast) {
+        "Broadcast to All Mesh Nodes"
+    } else if (peer != null) {
+        val transportName = when (peer.transportType) {
+            TransportType.BLE -> "Bluetooth LE"
+            TransportType.WIFI_DIRECT -> "Wi-Fi Direct"
+            TransportType.ULTRASONIC -> "Ultrasonic"
+        }
+        val origTag = if (!currentContact?.alias.isNullOrBlank()) "${peer.name} • " else ""
+        if (peer.isConnected) "${origTag}Connected via $transportName • E2EE (X25519)" else "${origTag}Offline ($transportName) • Store-Carry-Forward"
+    } else {
+        if (!currentContact?.alias.isNullOrBlank()) "Verified Contact • E2EE (X25519)" else "End-to-End Encrypted (X25519)"
+    }
 
     // Scroll to bottom when new messages arrive
     LaunchedEffect(messages.size) {
@@ -728,6 +840,142 @@ fun ConversationThreadView(
         )
     }
 
+    if (showVerifyFingerprintDialog && peer != null) {
+        val safetyNumber = DeadNetCrypto.computeSafetyNumbers(peer.publicKey)
+        val emojiFingerprint = DeadNetCrypto.computeEmojiFingerprint(peer.publicKey)
+
+        AlertDialog(
+            onDismissRequest = { showVerifyFingerprintDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Security,
+                        contentDescription = null,
+                        tint = Color(0xFF2E7D32),
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Safety Numbers & Identity", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Peer: $title (${peer.nodeId})",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = "Visual Emoji Fingerprint:\n$emojiFingerprint",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Surface(
+                        color = colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = safetyNumber,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(12.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                    Text(
+                        text = "To verify that your communication is encrypted end-to-end and has not been tampered with or intercepted, compare these safety numbers with your peer in person.",
+                        fontSize = 11.sp,
+                        color = colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showVerifyFingerprintDialog = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = colorScheme.primary)
+                ) {
+                    Text("Verified")
+                }
+            }
+        )
+    }
+
+    if (showEditContactDialog) {
+        var aliasInput by remember { mutableStateOf(currentContact?.alias ?: peer?.name ?: "") }
+        var notesInput by remember { mutableStateOf(currentContact?.notes ?: "") }
+
+        AlertDialog(
+            onDismissRequest = { showEditContactDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Badge,
+                        contentDescription = null,
+                        tint = colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Contact Nickname", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Node ID: ${if (conversationId.length > 16) conversationId.take(16) + "..." else conversationId}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        color = colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = aliasInput,
+                        onValueChange = { aliasInput = it },
+                        label = { Text("Peer Nickname / Alias") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = notesInput,
+                        onValueChange = { notesInput = it },
+                        label = { Text("Notes (optional)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (aliasInput.isNotBlank()) {
+                            onSetContactAlias(conversationId, aliasInput.trim(), notesInput.trim())
+                        }
+                        showEditContactDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = colorScheme.primary)
+                ) {
+                    Text("Save Contact")
+                }
+            },
+            dismissButton = {
+                Row {
+                    if (currentContact != null) {
+                        TextButton(
+                            onClick = {
+                                onDeleteContact(conversationId)
+                                showEditContactDialog = false
+                            }
+                        ) {
+                            Text("Remove", color = colorScheme.error)
+                        }
+                    }
+                    TextButton(onClick = { showEditContactDialog = false }) {
+                        Text("Cancel")
+                    }
+                }
+            }
+        )
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -770,6 +1018,26 @@ fun ConversationThreadView(
                         color = colorScheme.primary,
                         fontWeight = FontWeight.Medium
                     )
+                }
+
+                if (!isBroadcast) {
+                    IconButton(onClick = { showEditContactDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Badge,
+                            contentDescription = "Edit Contact Nickname",
+                            tint = if (currentContact != null) colorScheme.primary else colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                if (!isBroadcast && peer != null) {
+                    IconButton(onClick = { showVerifyFingerprintDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Security,
+                            contentDescription = "Verify Safety Numbers",
+                            tint = Color(0xFF2E7D32)
+                        )
+                    }
                 }
 
                 IconButton(onClick = { showDeleteChatDialog = true }) {
@@ -996,20 +1264,32 @@ fun PrivateMessageBubble(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (isOut) {
+                            val (statusIcon, statusTint, statusLabel) = when {
+                                message.isDelivered -> Triple(Icons.Default.DoneAll, Color(0xFF00E676), "Delivered")
+                                message.hopCount > 0 || message.tokensRemaining < 4 -> Triple(Icons.Default.CellTower, Color(0xFFFFA000), "In Mesh")
+                                else -> Triple(Icons.Default.Done, colorScheme.onSurfaceVariant.copy(alpha = 0.7f), "Dispatched")
+                            }
                             Icon(
-                                imageVector = if (message.isDelivered) Icons.Default.DoneAll else Icons.Default.Done,
-                                contentDescription = null,
-                                tint = if (message.isDelivered) Color(0xFF00E676) else colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(14.dp)
+                                imageVector = statusIcon,
+                                contentDescription = statusLabel,
+                                tint = statusTint,
+                                modifier = Modifier.size(13.dp)
                             )
-                            Spacer(modifier = Modifier.width(4.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = statusLabel,
+                                color = statusTint,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
                         }
                         Text(
                             text = timeFormatted,
                             color = colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                             fontSize = 10.sp
                         )
-                        if (message.hopCount > 0) {
+                        if (message.hopCount > 0 && !isOut) {
                             Text(
                                 text = " • ${message.hopCount} hop(s)",
                                 color = colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
@@ -1118,6 +1398,29 @@ fun FileTransferCard(session: FileTransferSession) {
                     trackColor = colorScheme.outline.copy(alpha = 0.2f)
                 )
             } else if (session.savedPath != null) {
+                val isImage = session.mimeType.startsWith("image/")
+                if (isImage) {
+                    val bitmap = remember(session.savedPath) {
+                        try {
+                            BitmapFactory.decodeFile(session.savedPath)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                    if (bitmap != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = session.fileName,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(180.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),

@@ -93,7 +93,10 @@ class BleTransport(
 
     // Throttle auto-connect attempts: device address -> last attempt timestamp.
     private val lastConnectionAttempt = ConcurrentHashMap<String, Long>()
+    private val consecutiveFailures = ConcurrentHashMap<String, Int>()
     private val CONNECTION_ATTEMPT_INTERVAL_MS = 15_000L
+    private val peerMtuMap = ConcurrentHashMap<String, Int>()
+    private val serverPeerMtuMap = ConcurrentHashMap<String, Int>()
 
     // Track subscribed centrals (CCCD-enabled) for server notification dispatch
     private val subscribedCentrals = mutableSetOf<String>()
@@ -188,6 +191,42 @@ class BleTransport(
     }
 
     @SuppressLint("MissingPermission")
+    fun triggerManualScan() {
+        log("Manual BLE scan requested by user.")
+        if (!_isRunning || bluetoothAdapter?.isEnabled != true) {
+            start()
+            return
+        }
+        stopAdvertising()
+        startAdvertising()
+        stopScanning()
+        startScanning()
+    }
+
+    @SuppressLint("MissingPermission")
+    fun connectToDevice(address: String) {
+        val adapter = bluetoothAdapter ?: return
+        try {
+            val device = adapter.getRemoteDevice(address) ?: return
+            lastConnectionAttempt.remove(address)
+            consecutiveFailures.remove(address)
+            connectToGatt(device)
+        } catch (e: Exception) {
+            log("connectToDevice error for $address: ${e.message}")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun disconnectDevice(address: String) {
+        val gatt = connectedGattClients[address]
+        if (gatt != null) {
+            cleanupGattClient(address, gatt)
+        } else {
+            updatePeerState(address, connected = false)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     override suspend fun sendPacket(packet: DeadNetPacket, targetPeer: PeerNode?): Boolean {
         val packetBytes = packet.toByteArray()
         log("Queueing packet ${packet.msgId} (${packetBytes.size} bytes) for BLE dispatch")
@@ -196,17 +235,23 @@ class BleTransport(
         val char = packetCharacteristic
         val server = gattServer
         if (server != null && char != null) {
-            val chunks = sliceIntoChunks(packetBytes, BleConstants.DEFAULT_BLE_CHUNK_SIZE)
-            // Broadcast each chunk to every subscribed central before moving to the
-            // next chunk, so latency doesn't scale linearly with the number of centrals.
             val centrals = subscribedCentrals.toList()
-            for (chunk in chunks) {
-                char.value = chunk
-                for (addr in centrals) {
-                    val device = bluetoothAdapter?.getRemoteDevice(addr) ?: continue
-                    server.notifyCharacteristicChanged(device, char, false)
+            for (addr in centrals) {
+                val device = bluetoothAdapter?.getRemoteDevice(addr) ?: continue
+                val mtu = serverPeerMtuMap[addr] ?: 23
+                val safeChunkSize = (mtu - 3).coerceIn(20, 509)
+                val chunks = sliceIntoChunks(packetBytes, safeChunkSize)
+                for (chunk in chunks) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        server.notifyCharacteristicChanged(device, char, false, chunk)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        char.value = chunk
+                        @Suppress("DEPRECATION")
+                        server.notifyCharacteristicChanged(device, char, false)
+                    }
+                    delay(25)
                 }
-                kotlinx.coroutines.delay(15) // Inter-chunk pacing
             }
         }
 
@@ -229,7 +274,10 @@ class BleTransport(
         val service = gatt.getService(BleConstants.SERVICE_UUID) ?: return
         val char = service.getCharacteristic(BleConstants.PACKET_CHARACTERISTIC_UUID) ?: return
 
-        val chunks = sliceIntoChunks(bytes, BleConstants.DEFAULT_BLE_CHUNK_SIZE)
+        val addr = gatt.device.address
+        val mtu = peerMtuMap[addr] ?: 23
+        val safeChunkSize = (mtu - 3).coerceIn(20, 509)
+        val chunks = sliceIntoChunks(bytes, safeChunkSize)
         for (chunk in chunks) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 gatt.writeCharacteristic(
@@ -245,7 +293,7 @@ class BleTransport(
                 @Suppress("DEPRECATION")
                 gatt.writeCharacteristic(char)
             }
-            delay(15) // Brief inter-chunk pacing for BLE stack
+            delay(25) // Reliable inter-chunk pacing for BLE stack
         }
     }
 
@@ -260,11 +308,28 @@ class BleTransport(
                 val addr = device.address
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
                     log("BLE Central connected: $addr")
-                    onHandshakeReady?.invoke()
+                    val peerName = try { device.name ?: "Nearby BLE Node" } catch (_: Exception) { "Nearby BLE Node" }
+                    val id = addr.replace(":", "").takeLast(8).uppercase()
+                    val peer = PeerNode(
+                        id = id,
+                        name = peerName,
+                        transportType = TransportType.BLE,
+                        rssi = -60,
+                        lastSeen = System.currentTimeMillis(),
+                        address = addr,
+                        isConnected = true,
+                        statusText = "CONNECTED"
+                    )
+                    discoveredPeersMap[addr] = peer
+                    _peersFlow.value = discoveredPeersMap.values.toList()
+                    // Note: Handshake will be triggered when central writes to CCCD and link is confirmed
+
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     log("BLE Central disconnected: $addr")
                     subscribedCentrals.remove(addr)
                     incomingBuffers.remove(addr)
+                    serverPeerMtuMap.remove(addr)
+                    updatePeerState(addr, connected = false)
                 }
             }
 
@@ -295,12 +360,17 @@ class BleTransport(
                 value: ByteArray?
             ) {
                 // Handle CCCD subscription for notifications
-                if (descriptor.uuid == BleConstants.CCCD_UUID && value != null && value.size >= 2) {
-                    val enabled = (value[0].toInt() and 0xFF) == 0x01
+                if (descriptor.uuid == BleConstants.CCCD_UUID && value != null) {
+                    val enabled = (value.isNotEmpty() && (value[0].toInt() and 0xFF) == 0x01)
                     val addr = device.address
                     if (enabled) {
                         subscribedCentrals.add(addr)
-                        log("Central $addr subscribed to notifications")
+                        log("Central $addr subscribed to notifications. Link bidirectional ready!")
+                        updatePeerState(addr, connected = true)
+                        scope.launch(Dispatchers.IO) {
+                            delay(100)
+                            onHandshakeReady?.invoke()
+                        }
                     } else {
                         subscribedCentrals.remove(addr)
                     }
@@ -312,6 +382,7 @@ class BleTransport(
 
             override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
                 log("MTU updated for ${device.address}: $mtu")
+                serverPeerMtuMap[device.address] = mtu
             }
         })
 
@@ -357,7 +428,8 @@ class BleTransport(
 
     @SuppressLint("MissingPermission")
     private fun startAdvertising() {
-        val advertiser = leAdvertiser ?: return
+        val advertiser = leAdvertiser ?: bluetoothAdapter?.bluetoothLeAdvertiser ?: return
+        leAdvertiser = advertiser
 
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
@@ -366,18 +438,23 @@ class BleTransport(
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
             .build()
 
-        // Include DeadNet Service UUID + truncated Node ID in service data
         val serviceUuid = ParcelUuid(BleConstants.SERVICE_UUID)
         val nodeIdBytes = ownKeyPair.publicKey.take(4).toByteArray()
 
-        val data = AdvertiseData.Builder()
+        // Primary Advertisement: 128-bit Service UUID only (stays strictly <= 31 bytes)
+        val advertiseData = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
+            .setIncludeTxPowerLevel(false)
             .addServiceUuid(serviceUuid)
+            .build()
+
+        // Scan Response: Truncated Node ID in Service Data (additional 31-byte response budget)
+        val scanResponse = AdvertiseData.Builder()
             .addServiceData(serviceUuid, nodeIdBytes)
             .build()
 
         try {
-            advertiser.startAdvertising(settings, data, advertiseCallback)
+            advertiser.startAdvertising(settings, advertiseData, scanResponse, advertiseCallback)
         } catch (e: Exception) {
             log("Error starting BLE advertising: ${e.message}")
         }
@@ -386,7 +463,8 @@ class BleTransport(
     @SuppressLint("MissingPermission")
     private fun stopAdvertising() {
         try {
-            leAdvertiser?.stopAdvertising(advertiseCallback)
+            val advertiser = leAdvertiser ?: bluetoothAdapter?.bluetoothLeAdvertiser
+            advertiser?.stopAdvertising(advertiseCallback)
         } catch (_: Exception) {}
     }
 
@@ -414,11 +492,17 @@ class BleTransport(
         val rssi = result.rssi
 
         val serviceUuids = result.scanRecord?.serviceUuids ?: emptyList()
-        val hasDeadNet = serviceUuids.any { it.uuid == BleConstants.SERVICE_UUID }
+        val serviceUuid = ParcelUuid(BleConstants.SERVICE_UUID)
+        val serviceData = result.scanRecord?.getServiceData(serviceUuid)
+        val hasDeadNet = serviceUuids.any { it.uuid == BleConstants.SERVICE_UUID } || serviceData != null
         if (!hasDeadNet) return
 
         val peerName = try { device.name ?: "Nearby BLE Node" } catch (_: Exception) { "Nearby BLE Node" }
-        val id = addr.replace(":", "").takeLast(8).uppercase()
+        val id = if (serviceData != null && serviceData.isNotEmpty()) {
+            serviceData.toHexString()
+        } else {
+            addr.replace(":", "").takeLast(8).uppercase()
+        }
 
         val peer = PeerNode(
             id = id,
@@ -449,7 +533,9 @@ class BleTransport(
         // connect attempts while the link is mid-setup or repeatedly failing.
         val now = System.currentTimeMillis()
         val last = lastConnectionAttempt[addr] ?: 0L
-        if (now - last < CONNECTION_ATTEMPT_INTERVAL_MS) return
+        val failures = consecutiveFailures[addr] ?: 0
+        val backoffMs = (CONNECTION_ATTEMPT_INTERVAL_MS * (1L shl failures.coerceAtMost(4))).coerceAtMost(300_000L)
+        if (now - last < backoffMs) return
         lastConnectionAttempt[addr] = now
 
         log("Connecting BLE GATT to $addr (${device.name ?: "Unknown"})...")
@@ -465,11 +551,12 @@ class BleTransport(
                     }
                     log("Connected to BLE GATT server: $addr. Discovering services...")
                     connectedGattClients[addr] = gatt
-                    gatt.requestMtu(256)
-                    gatt.discoverServices()
+                    val mtuReq = gatt.requestMtu(256)
+                    if (!mtuReq) gatt.discoverServices()
 
-                    updatePeerState(addr, connected = true)
-                    onHandshakeReady?.invoke()
+
+
+
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     log("Disconnected from BLE GATT: $addr")
                     cleanupGattClient(addr, gatt)
@@ -500,7 +587,10 @@ class BleTransport(
             }
 
             override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-                log("Client MTU updated for ${gatt.device.address}: $mtu (status=$status)")
+                val addr = gatt.device.address
+                peerMtuMap[addr] = mtu
+                log("Client MTU updated for $addr: $mtu (status=$status). Discovering services...")
+                gatt.discoverServices()
             }
 
             override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
@@ -509,17 +599,39 @@ class BleTransport(
 
             override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
                 log("Client CCCD write to $addr: ${descriptor.uuid} status=$status")
+                if (descriptor.uuid == BleConstants.CCCD_UUID && status == BluetoothGatt.GATT_SUCCESS) {
+                    consecutiveFailures.remove(addr)
+                    updatePeerState(addr, connected = true)
+                    scope.launch(Dispatchers.IO) {
+                        delay(100)
+                        onHandshakeReady?.invoke()
+                    }
+                }
             }
 
+            @Deprecated("Used on Android 12 and below")
             override fun onCharacteristicChanged(
                 gatt: BluetoothGatt,
                 characteristic: BluetoothGattCharacteristic
             ) {
-                if (characteristic.uuid == BleConstants.PACKET_CHARACTERISTIC_UUID) {
-                    val value = characteristic.value
-                    if (value != null) {
-                        handleIncomingBytes(gatt.device.address, value)
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                    if (characteristic.uuid == BleConstants.PACKET_CHARACTERISTIC_UUID) {
+                        @Suppress("DEPRECATION")
+                        val value = characteristic.value
+                        if (value != null) {
+                            handleIncomingBytes(gatt.device.address, value)
+                        }
                     }
+                }
+            }
+
+            override fun onCharacteristicChanged(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                value: ByteArray
+            ) {
+                if (characteristic.uuid == BleConstants.PACKET_CHARACTERISTIC_UUID) {
+                    handleIncomingBytes(gatt.device.address, value)
                 }
             }
         }
@@ -535,11 +647,17 @@ class BleTransport(
                 }
                 if (gatt == null) {
                     // Failed to start the connect; allow a retry on a later scan.
-                    lastConnectionAttempt.remove(addr)
+                    peerMtuMap.remove(addr)
+        lastConnectionAttempt[addr] = System.currentTimeMillis()
+        val failures = (consecutiveFailures[addr] ?: 0) + 1
+        consecutiveFailures[addr] = failures
                     log("connectGatt returned null for $addr")
                 }
             } catch (e: Exception) {
-                lastConnectionAttempt.remove(addr)
+                peerMtuMap.remove(addr)
+        lastConnectionAttempt[addr] = System.currentTimeMillis()
+        val failures = (consecutiveFailures[addr] ?: 0) + 1
+        consecutiveFailures[addr] = failures
                 log("connectGatt error for $addr: ${e.message}")
             }
         }
@@ -550,7 +668,10 @@ class BleTransport(
         connectedGattClients.remove(addr)
         perDeviceWriteMutex.remove(addr)
         incomingBuffers.remove(addr)
-        lastConnectionAttempt.remove(addr)
+        peerMtuMap.remove(addr)
+        lastConnectionAttempt[addr] = System.currentTimeMillis()
+        val failures = (consecutiveFailures[addr] ?: 0) + 1
+        consecutiveFailures[addr] = failures
         try { gatt.disconnect() } catch (_: Exception) {}
         try { gatt.close() } catch (_: Exception) {}
 
@@ -582,11 +703,8 @@ class BleTransport(
 
     @SuppressLint("MissingPermission")
     private fun startScanning() {
-        val scanner = leScanner ?: return
-        // No service-UUID scan filter: some BLE stacks omit the 128-bit UUID from
-        // the top-level advertising field set, which makes an exact UUID filter
-        // silently match nothing. We filter instead in handleScanResult by
-        // checking serviceUuids (and fall back to service data) on each result.
+        val scanner = leScanner ?: bluetoothAdapter?.bluetoothLeScanner ?: return
+        leScanner = scanner
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
@@ -600,7 +718,8 @@ class BleTransport(
     @SuppressLint("MissingPermission")
     private fun stopScanning() {
         try {
-            leScanner?.stopScan(scanCallback)
+            val scanner = leScanner ?: bluetoothAdapter?.bluetoothLeScanner
+            scanner?.stopScan(scanCallback)
         } catch (_: Exception) {}
     }
 
@@ -610,31 +729,68 @@ class BleTransport(
         val buffer = incomingBuffers.getOrPut(remoteAddress) { ByteArrayOutputStream() }
         synchronized(buffer) {
             buffer.write(chunk)
-            val currentBytes = buffer.toByteArray()
+            var currentBytes = buffer.toByteArray()
 
-            // Check if we have at least the 92-byte header
-            if (currentBytes.size >= DeadNetPacket.HEADER_SIZE) {
-                // Header layout: payloadLength is at offset 90 (2 bytes)
-                val payloadLen = ByteBuffer.wrap(currentBytes, 90, 2).short.toInt() and 0xFFFF
-                val fullPacketSize = DeadNetPacket.HEADER_SIZE + payloadLen
-
-                if (currentBytes.size >= fullPacketSize) {
-                    try {
-                        val packetBytes = currentBytes.copyOfRange(0, fullPacketSize)
-                        val packet = DeadNetPacket.fromByteArray(packetBytes)
-                        log("Assembled complete packet from BLE $remoteAddress (${packet.msgId}, type ${packet.packetType})")
-                        onPacketReceived?.invoke(packet)
-
-                        // Clear assembled packet bytes from buffer
-                        buffer.reset()
-                        if (currentBytes.size > fullPacketSize) {
-                            buffer.write(currentBytes.copyOfRange(fullPacketSize, currentBytes.size))
-                        }
-                    } catch (e: Exception) {
-                        log("BLE packet parse error: ${e.message}")
-                        buffer.reset()
+            while (true) {
+                // 1. Scan for DeadNet MAGIC (0xDEAD)
+                var magicIndex = -1
+                for (i in 0 until currentBytes.size - 1) {
+                    if (currentBytes[i] == 0xDE.toByte() && currentBytes[i + 1] == 0xAD.toByte()) {
+                        magicIndex = i
+                        break
                     }
                 }
+
+                if (magicIndex < 0) {
+                    buffer.reset()
+                    if (currentBytes.isNotEmpty() && currentBytes.last() == 0xDE.toByte()) {
+                        buffer.write(byteArrayOf(0xDE.toByte()))
+                    }
+                    return
+                }
+
+                // If magic is not at index 0, drop leading noise/orphan bytes
+                if (magicIndex > 0) {
+                    currentBytes = currentBytes.copyOfRange(magicIndex, currentBytes.size)
+                    buffer.reset()
+                    buffer.write(currentBytes)
+                }
+
+                // 2. Check if we have at least the 92-byte header
+                if (currentBytes.size < DeadNetPacket.HEADER_SIZE) {
+                    return
+                }
+
+                // 3. Read payload length at offset 90
+                val payloadLen = ByteBuffer.wrap(currentBytes, 90, 2).short.toInt() and 0xFFFF
+                if (payloadLen > DeadNetPacket.MAX_PAYLOAD_SIZE) {
+                    // Corrupted header - drop past this magic and scan again
+                    currentBytes = currentBytes.copyOfRange(2, currentBytes.size)
+                    buffer.reset()
+                    buffer.write(currentBytes)
+                    continue
+                }
+
+                val fullPacketSize = DeadNetPacket.HEADER_SIZE + payloadLen
+                if (currentBytes.size < fullPacketSize) {
+                    return
+                }
+
+                // 4. Parse complete packet
+                try {
+                    val packetBytes = currentBytes.copyOfRange(0, fullPacketSize)
+                    val packet = DeadNetPacket.fromByteArray(packetBytes)
+                    log("Assembled complete packet from BLE $remoteAddress (${packet.msgId}, type ${packet.packetType})")
+                    onPacketReceived?.invoke(packet)
+                } catch (e: Exception) {
+                    log("BLE packet parse error: ${e.message}")
+                }
+
+                // 5. Advance buffer past the consumed packet
+                val remainingBytes = currentBytes.copyOfRange(fullPacketSize, currentBytes.size)
+                buffer.reset()
+                buffer.write(remainingBytes)
+                currentBytes = remainingBytes
             }
         }
     }

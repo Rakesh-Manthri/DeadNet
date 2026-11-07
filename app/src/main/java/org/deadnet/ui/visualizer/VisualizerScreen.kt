@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.deadnet.data.DeadNetMessage
 import org.deadnet.transport.PeerNode
+import org.deadnet.transport.TransportType
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -145,6 +146,10 @@ fun TopologyView(
         label = "PulseRadius"
     )
 
+    val wifiPeers = peers.filter { it.transportType == TransportType.WIFI_DIRECT }
+    val blePeers = peers.filter { it.transportType == TransportType.BLE }
+    val connectedCount = peers.count { it.isConnected }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -154,21 +159,26 @@ fun TopologyView(
         // Metrics Summary Row
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             MetricCard(
-                title = "PEERS",
-                value = "${peers.size}",
+                title = "WI-FI",
+                value = "${wifiPeers.size}",
                 modifier = Modifier.weight(1f)
             )
             MetricCard(
-                title = "STORED DTN",
+                title = "BLE",
+                value = "${blePeers.size}",
+                modifier = Modifier.weight(1f)
+            )
+            MetricCard(
+                title = "ACTIVE",
+                value = "$connectedCount",
+                modifier = Modifier.weight(1f)
+            )
+            MetricCard(
+                title = "DTN MSGS",
                 value = "${messages.size}",
-                modifier = Modifier.weight(1f)
-            )
-            MetricCard(
-                title = "TOKENS",
-                value = "${messages.sumOf { it.tokensRemaining }}",
                 modifier = Modifier.weight(1f)
             )
         }
@@ -221,9 +231,15 @@ fun TopologyView(
                         val peerY = center.y + (orbitRadius * sin(angle)).toFloat()
                         val peerOffset = Offset(peerX, peerY)
 
+                        val linkColor = when (peer.transportType) {
+                            TransportType.WIFI_DIRECT -> if (peer.isConnected) Color(0xFF00E676) else Color(0xFFFFB300)
+                            TransportType.BLE -> if (peer.isConnected) Color(0xFF00E5FF) else Color(0xFF7C4DFF)
+                            TransportType.ULTRASONIC -> if (peer.isConnected) Color(0xFFBA68C8) else Color(0xFF9E9E9E)
+                        }
+
                         // Link line
                         drawLine(
-                            color = if (peer.isConnected) Color(0xFF00E676) else Color(0xFFFFB300),
+                            color = linkColor,
                             start = center,
                             end = peerOffset,
                             strokeWidth = if (peer.isConnected) 3f else 1.5f,
@@ -233,7 +249,7 @@ fun TopologyView(
 
                         // Peer node circle
                         drawCircle(
-                            color = if (peer.isConnected) Color(0xFF00E676) else Color(0xFFFFB300),
+                            color = linkColor,
                             radius = 14.dp.toPx(),
                             center = peerOffset
                         )
@@ -268,7 +284,7 @@ fun TopologyView(
                         color = colorScheme.surfaceVariant.copy(alpha = 0.9f)
                     ) {
                         Text(
-                            text = "This Device • Connected: ${peers.count { it.isConnected }} • Discovered: ${peers.size}",
+                            text = "🟢 Wi-Fi (${wifiPeers.size}) • 🔵 BLE (${blePeers.size}) • Active Links: $connectedCount",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium,
                             color = colorScheme.onSurfaceVariant,

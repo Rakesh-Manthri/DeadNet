@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -47,12 +48,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import org.deadnet.ui.DeadNetViewModel
 import org.deadnet.ui.chat.ChatScreen
 import org.deadnet.ui.radar.RadarScreen
+import org.deadnet.ui.settings.SettingsScreen
 import org.deadnet.ui.visualizer.VisualizerScreen
 
 enum class DeadNetTab(val title: String) {
     RADAR("Radar View"),
     CHAT("Mesh Chat"),
-    VISUALIZER("Mesh Visualizer")
+    VISUALIZER("Mesh Visualizer"),
+    SETTINGS("Settings")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -64,8 +67,10 @@ fun MainNavigation(
     val colorScheme = MaterialTheme.colorScheme
 
     val ownNodeId by viewModel.ownNodeId.collectAsState()
+    val myDeviceName by viewModel.myDeviceName.collectAsState()
     val peers by viewModel.peers.collectAsState()
     val knownPeers by viewModel.knownPeers.collectAsState()
+    val contacts by viewModel.contacts.collectAsState()
     val messages by viewModel.messages.collectAsState()
     val logs by viewModel.logs.collectAsState()
     val selectedConversationId by viewModel.selectedConversationId.collectAsState()
@@ -188,6 +193,20 @@ fun MainNavigation(
                         unselectedTextColor = colorScheme.onSurfaceVariant
                     )
                 )
+
+                NavigationBarItem(
+                    selected = selectedTab == DeadNetTab.SETTINGS,
+                    onClick = { selectedTab = DeadNetTab.SETTINGS },
+                    icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
+                    label = { Text("Settings", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = colorScheme.primary,
+                        selectedTextColor = colorScheme.primary,
+                        indicatorColor = colorScheme.primary.copy(alpha = 0.15f),
+                        unselectedIconColor = colorScheme.onSurfaceVariant,
+                        unselectedTextColor = colorScheme.onSurfaceVariant
+                    )
+                )
             }
         }
     ) { innerPadding ->
@@ -198,10 +217,11 @@ fun MainNavigation(
         ) {
             when (selectedTab) {
                 DeadNetTab.RADAR -> RadarScreen(
-                    deviceName = viewModel.myDeviceName,
+                    deviceName = myDeviceName,
                     peers = peers,
+                    contacts = contacts,
                     onConnectPeer = { peer -> viewModel.connectToPeer(peer) },
-                    onDisconnectPeer = { viewModel.disconnectPeer() },
+                    onDisconnectPeer = { peer -> viewModel.disconnectPeer(peer) },
                     onTriggerScan = { viewModel.triggerScan() },
                     onOpenChat = { peer ->
                         viewModel.selectConversationForPeer(peer)
@@ -213,18 +233,25 @@ fun MainNavigation(
                     knownPeers = knownPeers,
                     selectedConversationId = selectedConversationId,
                     fileTransferSessions = fileTransferSessions,
+                    contacts = contacts,
                     onSelectConversation = { viewModel.selectConversation(it) },
                     onSendMessage = { convId, text -> viewModel.sendMessageToConversation(convId, text) },
                     onSendFile = { convId, uri -> viewModel.sendFile(uri, convId) },
                     onDeleteMessage = { viewModel.deleteMessage(it) },
                     onDeleteConversation = { viewModel.deleteConversation(it) },
-                    onClearAllMessages = { viewModel.clearAllMessages() }
+                    onClearAllMessages = { viewModel.clearAllMessages() },
+                    onPanicWipe = { viewModel.panicWipe() },
+                    onSetContactAlias = { nodeId, alias, notes -> viewModel.setContactAlias(nodeId, alias, notes) },
+                    onDeleteContact = { nodeId -> viewModel.deleteContact(nodeId) }
                 )
                 DeadNetTab.VISUALIZER -> VisualizerScreen(
                     ownNodeId = ownNodeId,
                     peers = peers,
                     messages = messages,
                     logs = logs
+                )
+                DeadNetTab.SETTINGS -> SettingsScreen(
+                    viewModel = viewModel
                 )
             }
         }

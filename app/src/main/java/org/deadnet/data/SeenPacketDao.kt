@@ -19,4 +19,7 @@ interface SeenPacketDao {
 
     @Query("SELECT COUNT(*) FROM seen_packets")
     suspend fun getSeenCount(): Int
+
+    @Query("DELETE FROM seen_packets")
+    suspend fun clearAll(): Int
 }

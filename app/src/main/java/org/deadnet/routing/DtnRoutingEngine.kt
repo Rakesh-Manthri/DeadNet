@@ -49,6 +49,10 @@ class DtnRoutingEngine(
         const val EVICTION_INTERVAL_MS = 600000L // 10 minutes
     }
 
+    var customNodeName: String? = null
+    var configuredTokenQuota: Int = DEFAULT_TOKEN_QUOTA
+    var configuredTtlSeconds: Long = DEFAULT_TTL_SECONDS
+
     private val transports = mutableListOf<TransportLayer>()
     private var evictionJob: Job? = null
 
@@ -103,7 +107,8 @@ class DtnRoutingEngine(
      */
     fun broadcastHandshake() {
         scope.launch(Dispatchers.IO) {
-            val deviceName = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
+            val deviceName = customNodeName?.ifBlank { null }
+                ?: "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}"
             val payload = deviceName.toByteArray(Charsets.UTF_8)
             val packet = DeadNetPacket(
                 msgType = PacketType.HANDSHAKE.code,
@@ -338,7 +343,8 @@ class DtnRoutingEngine(
             val msgId = UUID.randomUUID()
             val ciphertext = DeadNetCrypto.encrypt(effectiveRecipient, text.toByteArray(Charsets.UTF_8))
             val nowSec = System.currentTimeMillis() / 1000L
-            val ttlSec = nowSec + DEFAULT_TTL_SECONDS
+            val ttlSec = nowSec + configuredTtlSeconds
+            val quota = configuredTokenQuota
 
             val targetNodeId = if (isBroadcast) "BROADCAST" else DeadNetCrypto.deriveNodeId(effectiveRecipient)
             val title = if (isBroadcast) "Mesh Broadcast" else if (recipientName.isNotBlank()) recipientName else "Node $targetNodeId"
@@ -350,7 +356,7 @@ class DtnRoutingEngine(
                 recipientPubKey = effectiveRecipient,
                 ttl = ttlSec,
                 hopCount = 0,
-                tokensRemaining = if (isBroadcast) 0.toByte() else DEFAULT_TOKEN_QUOTA.toByte(),
+                tokensRemaining = if (isBroadcast) 0.toByte() else quota.toByte(),
                 payload = ciphertext
             )
 
@@ -361,7 +367,7 @@ class DtnRoutingEngine(
                     senderPubKey = ownKeyPair.publicKey,
                     recipientPubKey = effectiveRecipient,
                     ciphertext = ciphertext,
-                    tokensRemaining = if (isBroadcast) 0 else DEFAULT_TOKEN_QUOTA,
+                    tokensRemaining = if (isBroadcast) 0 else quota,
                     hopCount = 0,
                     createdAt = System.currentTimeMillis(),
                     ttlExpiresAt = ttlSec * 1000L,
@@ -396,6 +402,20 @@ class DtnRoutingEngine(
     suspend fun clearAllMessages() {
         database.deadNetMessageDao().deleteAllMessages()
         log("Cleared all stored messages")
+    }
+
+    /**
+     * Emergency Panic Wipe: Purges all messages, seen packet deduplication history,
+     * and in-memory peer registries immediately.
+     */
+    suspend fun panicWipe() {
+        log("Executing emergency PANIC WIPE...")
+        database.deadNetMessageDao().deleteAllMessages()
+        database.seenPacketDao().clearAll()
+        database.peerContactDao().clearAll()
+        knownPeersMap.clear()
+        _knownPeersFlow.value = emptyList()
+        log("Panic Wipe complete: all messages and packet history erased.")
     }
 
     private fun startEvictionDaemon() {

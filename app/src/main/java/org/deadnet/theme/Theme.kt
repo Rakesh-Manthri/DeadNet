@@ -37,18 +37,39 @@ private val LightColorScheme = lightColorScheme(
     outline = Color(0xFFD0D7DE)
 )
 
+private val AmoledColorScheme = darkColorScheme(
+    primary = DeadNetBlueDark,
+    secondary = DeadNetTealDark,
+    tertiary = DeadNetGreenLight,
+    background = Color(0xFF000000),
+    surface = Color(0xFF0A0A0A),
+    surfaceVariant = Color(0xFF141414),
+    onBackground = Color(0xFFE6EDF3),
+    onSurface = Color(0xFFE6EDF3),
+    onSurfaceVariant = Color(0xFF8B949E),
+    outline = Color(0xFF242424)
+)
+
 @Composable
 fun DeadNetTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    themeMode: String = "system",
     dynamicColor: Boolean = false, // Set false to ensure consistent tactical DeadNet styling
     content: @Composable () -> Unit
 ) {
+    val isSystemDark = isSystemInDarkTheme()
+    val isDark = when (themeMode.lowercase()) {
+        "light" -> false
+        "dark", "amoled" -> true
+        else -> isSystemDark
+    }
+
     val colorScheme = when {
+        themeMode.equals("amoled", ignoreCase = true) -> AmoledColorScheme
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+            if (isDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> DarkColorScheme
+        isDark -> DarkColorScheme
         else -> LightColorScheme
     }
 

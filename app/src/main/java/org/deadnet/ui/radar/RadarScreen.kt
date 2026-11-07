@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sensors
@@ -43,6 +45,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,6 +57,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.deadnet.data.PeerContact
 import org.deadnet.transport.PeerNode
 import org.deadnet.transport.TransportType
 
@@ -59,13 +65,21 @@ import org.deadnet.transport.TransportType
 fun RadarScreen(
     deviceName: String,
     peers: List<PeerNode>,
+    contacts: List<PeerContact> = emptyList(),
     onConnectPeer: (PeerNode) -> Unit,
-    onDisconnectPeer: () -> Unit,
+    onDisconnectPeer: (PeerNode) -> Unit,
     onTriggerScan: () -> Unit,
     onOpenChat: ((PeerNode) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    var selectedFilter by remember { mutableStateOf<TransportType?>(null) }
+
+    val wifiCount = peers.count { it.transportType == TransportType.WIFI_DIRECT }
+    val bleCount = peers.count { it.transportType == TransportType.BLE }
+    val filteredPeers = remember(peers, selectedFilter) {
+        if (selectedFilter == null) peers else peers.filter { it.transportType == selectedFilter }
+    }
 
     Column(
         modifier = modifier
@@ -141,7 +155,7 @@ fun RadarScreen(
                     letterSpacing = 0.5.sp
                 )
                 Text(
-                    text = "Wi-Fi Direct P2P Channel Active",
+                    text = "Dual-Mesh Active • $wifiCount Wi-Fi Direct • $bleCount Bluetooth LE",
                     color = colorScheme.onSurfaceVariant,
                     fontSize = 10.sp
                 )
@@ -184,7 +198,35 @@ fun RadarScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        if (peers.isEmpty()) {
+        // Radio Transport Filter Chips
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TransportFilterChip(
+                selected = selectedFilter == null,
+                label = "All (${peers.size})",
+                onClick = { selectedFilter = null }
+            )
+            TransportFilterChip(
+                selected = selectedFilter == TransportType.WIFI_DIRECT,
+                label = "Wi-Fi ($wifiCount)",
+                onClick = {
+                    selectedFilter = if (selectedFilter == TransportType.WIFI_DIRECT) null else TransportType.WIFI_DIRECT
+                }
+            )
+            TransportFilterChip(
+                selected = selectedFilter == TransportType.BLE,
+                label = "BLE ($bleCount)",
+                onClick = {
+                    selectedFilter = if (selectedFilter == TransportType.BLE) null else TransportType.BLE
+                }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        if (filteredPeers.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -193,7 +235,11 @@ fun RadarScreen(
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = "No DeadNet peers found nearby.\nEnsure Wi-Fi is enabled on both devices.",
+                        text = if (selectedFilter != null) {
+                            "No peers found for the selected transport filter."
+                        } else {
+                            "No DeadNet peers found nearby.\nEnsure Wi-Fi and Bluetooth are enabled on both devices."
+                        },
                         color = colorScheme.onSurfaceVariant,
                         fontSize = 13.sp,
                         fontFamily = FontFamily.Monospace,
@@ -214,11 +260,13 @@ fun RadarScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(bottom = 16.dp)
             ) {
-                items(peers, key = { it.address.ifBlank { it.id } }) { peer ->
+                items(filteredPeers, key = { it.address.ifBlank { it.id } }) { peer ->
+                    val alias = contacts.find { it.nodeId == peer.nodeId }?.alias
                     PeerItemCard(
                         peer = peer,
+                        alias = alias,
                         onConnect = { onConnectPeer(peer) },
-                        onDisconnect = onDisconnectPeer,
+                        onDisconnect = { onDisconnectPeer(peer) },
                         onOpenChat = onOpenChat?.let { { it(peer) } }
                     )
                 }
@@ -228,8 +276,33 @@ fun RadarScreen(
 }
 
 @Composable
+private fun TransportFilterChip(
+    selected: Boolean,
+    label: String,
+    onClick: () -> Unit
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = if (selected) colorScheme.primary else colorScheme.surfaceVariant,
+        contentColor = if (selected) colorScheme.onPrimary else colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+        )
+    }
+}
+
+@Composable
 fun PeerItemCard(
     peer: PeerNode,
+    alias: String? = null,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     onOpenChat: (() -> Unit)? = null
@@ -258,7 +331,7 @@ fun PeerItemCard(
                     shape = RoundedCornerShape(8.dp),
                     color = when (peer.transportType) {
                         TransportType.WIFI_DIRECT -> colorScheme.primary
-                        TransportType.BLE -> Color(0xFF00695C)
+                        TransportType.BLE -> Color(0xFF00897B)
                         TransportType.ULTRASONIC -> Color(0xFF6A1B9A)
                     },
                     modifier = Modifier.size(40.dp)
@@ -267,7 +340,7 @@ fun PeerItemCard(
                         Icon(
                             imageVector = when (peer.transportType) {
                                 TransportType.WIFI_DIRECT -> Icons.Default.Wifi
-                                TransportType.BLE -> Icons.Default.CellTower
+                                TransportType.BLE -> Icons.Default.Bluetooth
                                 TransportType.ULTRASONIC -> Icons.AutoMirrored.Filled.VolumeUp
                             },
                             contentDescription = null,
@@ -281,7 +354,7 @@ fun PeerItemCard(
 
                 Column {
                     Text(
-                        text = peer.name,
+                        text = if (!alias.isNullOrBlank()) "$alias (${peer.name})" else peer.name,
                         color = colorScheme.onSurface,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
@@ -296,8 +369,14 @@ fun PeerItemCard(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold
                     )
+                    val transportName = when (peer.transportType) {
+                        TransportType.WIFI_DIRECT -> "Wi-Fi Direct"
+                        TransportType.BLE -> "Bluetooth LE"
+                        TransportType.ULTRASONIC -> "Ultrasonic"
+                    }
+                    val signalInfo = if (peer.rssi != 0) "$transportName • Signal: ${peer.rssi} dBm" else transportName
                     Text(
-                        text = "Wi-Fi Direct • Signal: ${peer.rssi} dBm",
+                        text = signalInfo,
                         color = colorScheme.onSurfaceVariant,
                         fontSize = 10.sp
                     )

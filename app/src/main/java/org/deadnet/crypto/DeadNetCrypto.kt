@@ -216,6 +216,45 @@ object DeadNetCrypto {
     }
 
     /**
+     * Computes a human-readable safety number string (6 groups of 5 digits)
+     * derived from SHA-256 of the public key, modeled after Signal safety numbers.
+     */
+    fun computeSafetyNumbers(publicKey: ByteArray): String {
+        if (publicKey.isEmpty()) return "00000 00000 00000 00000 00000 00000"
+        val hash = MessageDigest.getInstance("SHA-256").digest(publicKey)
+        val sb = StringBuilder()
+        for (i in 0 until 6) {
+            val offset = i * 4
+            val chunk = ((hash[offset].toInt() and 0x7F) shl 24) or
+                    ((hash[offset + 1].toInt() and 0xFF) shl 16) or
+                    ((hash[offset + 2].toInt() and 0xFF) shl 8) or
+                    (hash[offset + 3].toInt() and 0xFF)
+            val digits = "%05d".format(Locale.ROOT, (chunk % 100000))
+            sb.append(digits)
+            if (i < 5) sb.append(" ")
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Computes a visual 4-emoji fingerprint from public key for quick visual verification.
+     */
+    fun computeEmojiFingerprint(publicKey: ByteArray): String {
+        if (publicKey.isEmpty()) return "🔒❓"
+        val emojis = listOf(
+            "🛡️", "⚡", "🛰️", "🧭", "⚓", "🪐", "💎", "🔑",
+            "🚀", "🌊", "🔥", "🦅", "🐺", "🌲", "🏔️", "☀️",
+            "🌟", "🔮", "🦁", "🐬", "🦊", "🐯", "🍉", "🍒",
+            "🌙", "🍀", "🎯", "🎲", "🧩", "📡", "🛸", "🏆"
+        )
+        val hash = MessageDigest.getInstance("SHA-256").digest(publicKey)
+        return (0 until 4).joinToString(" ") { i ->
+            val idx = (hash[i].toInt() and 0xFF) % emojis.size
+            emojis[idx]
+        }
+    }
+
+    /**
      * Helper to parse hex string to byte array safely.
      */
     fun hexToBytes(hex: String): ByteArray {
