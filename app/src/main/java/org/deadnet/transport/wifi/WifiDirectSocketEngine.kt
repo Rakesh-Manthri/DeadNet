@@ -87,7 +87,9 @@ class WifiDirectSocketEngine(
                     } ?: break
 
                     onLog("Client connected from ${client.inetAddress.hostAddress}")
-                    handleSocketSession(client)
+                    scope.launch(Dispatchers.IO) {
+                        handleSocketSession(client)
+                    }
                 }
             } catch (e: Exception) {
                 if (isActive) {
@@ -105,16 +107,17 @@ class WifiDirectSocketEngine(
         clientJob = scope.launch(Dispatchers.IO) {
             var attempt = 0
             var connectedSocket: Socket? = null
-            while (isActive && attempt < 4 && connectedSocket == null) {
+            // Retry up to 15 times (~30 seconds) to allow Group Owner DHCP & ServerSocket to bind
+            while (isActive && attempt < 15 && connectedSocket == null) {
                 attempt++
                 try {
                     val socket = Socket()
-                    socket.connect(InetSocketAddress(hostAddress, port), CONNECT_TIMEOUT_MS)
+                    socket.connect(InetSocketAddress(hostAddress, port), 3000)
                     connectedSocket = socket
                     onLog("Connected to GO at $hostAddress:$port (attempt $attempt)")
                 } catch (e: IOException) {
                     onLog("Connect attempt $attempt to $hostAddress failed: ${e.message}")
-                    kotlinx.coroutines.delay(1500)
+                    kotlinx.coroutines.delay(2000)
                 }
             }
 

@@ -194,9 +194,8 @@ class WifiDirectTransport(
         val config = WifiP2pConfig().apply {
             this.deviceAddress = deviceAddress
             wps.setup = WpsInfo.PBC
-            // groupOwnerIntent = 0: prefer to be a client so that whichever
-            // device is already a GO stays as GO, enabling multi-device mesh.
-            groupOwnerIntent = 0
+            // groupOwnerIntent = 7: balanced mid-range intent (0-15) for stable P2P group negotiation
+            groupOwnerIntent = 7
         }
 
         // 30-second connection timeout guard
@@ -318,26 +317,31 @@ class WifiDirectTransport(
                         val ch = channel ?: return
 
                         @Suppress("DEPRECATION")
-                        val connected = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            val info = intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO, NetworkInfo::class.java)
-                            info?.isConnected == true
+                        val p2pInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_INFO, WifiP2pInfo::class.java)
                         } else {
-                            val info = intent.getParcelableExtra<NetworkInfo>(WifiP2pManager.EXTRA_NETWORK_INFO)
-                            info?.isConnected == true
+                            intent.getParcelableExtra<WifiP2pInfo>(WifiP2pManager.EXTRA_WIFI_P2P_INFO)
                         }
-                        log("Wi-Fi P2P connection changed. IsConnected: $connected")
-                        if (connected) {
+
+                        if (p2pInfo != null && p2pInfo.groupFormed) {
+                            log("Wi-Fi P2P group confirmed via intent extra (IsGO=${p2pInfo.isGroupOwner}, GO=${p2pInfo.groupOwnerAddress?.hostAddress})")
+                            handleConnectionInfoAvailable(p2pInfo)
+                        } else {
                             try {
                                 mgr.requestConnectionInfo(ch) { info ->
-                                    handleConnectionInfoAvailable(info)
+                                    if (info != null && info.groupFormed) {
+                                        log("Wi-Fi P2P group confirmed via requestConnectionInfo: Group Formed (IsGO=${info.isGroupOwner}, GO=${info.groupOwnerAddress?.hostAddress})")
+                                        handleConnectionInfoAvailable(info)
+                                    } else {
+                                        log("Wi-Fi P2P connection state: disconnected.")
+                                        isConnectingOrConnected.set(false)
+                                        currentGroupInfo = null
+                                        socketEngine?.stop()
+                                    }
                                 }
                             } catch (e: SecurityException) {
-                                log("requestConnectionInfo permission error: ${e.message}")
+                                log("requestConnectionInfo error: ${e.message}")
                             }
-                        } else {
-                            isConnectingOrConnected.set(false)
-                            currentGroupInfo = null
-                            socketEngine?.stop()
                         }
                     }
 
@@ -411,11 +415,17 @@ class WifiDirectTransport(
             } else peer
         }
 
+        // Avoid re-initializing if socket is already active
+        if (socketEngine?.isConnected == true) {
+            log("Wi-Fi Direct socket already active. Skipping redundant startup.")
+            return
+        }
+
         if (info.isGroupOwner) {
             log("This node is Group Owner (GO). Launching ServerSocket(8888)...")
             socketEngine?.startServer()
         } else {
-            val goHost = info.groupOwnerAddress?.hostAddress ?: "192.168.49.1"
+            val goHost = info.groupOwnerAddress?.hostAddress?.takeIf { it != "0.0.0.0" } ?: "192.168.49.1"
             log("This node is Group Client. Connecting to GO at $goHost:8888...")
             socketEngine?.startClient(goHost)
         }

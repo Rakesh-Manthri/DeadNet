@@ -176,16 +176,29 @@ data class DeadNetPacket(
         }
 
         fun fromInputStream(inputStream: InputStream): DeadNetPacket {
-            val headerBuffer = ByteArray(HEADER_SIZE)
-            readFully(inputStream, headerBuffer)
-
-            val buffer = ByteBuffer.wrap(headerBuffer)
-            buffer.order(ByteOrder.BIG_ENDIAN)
-
-            val magic = buffer.short
-            if (magic != MAGIC) {
-                throw IllegalArgumentException("Invalid magic bytes: 0x${Integer.toHexString(magic.toInt() and 0xFFFF)}")
+            // 1. Scan and sync to MAGIC bytes (0xDEAD) to discard any stream noise
+            var b1 = inputStream.read()
+            if (b1 == -1) throw java.io.EOFException("Premature EOF while syncing to magic bytes")
+            while (true) {
+                if (b1 == 0xDE) {
+                    val b2 = inputStream.read()
+                    if (b2 == -1) throw java.io.EOFException("Premature EOF reading second magic byte")
+                    if (b2 == 0xAD) {
+                        break // Synchronized to 0xDEAD!
+                    }
+                    b1 = b2
+                } else {
+                    b1 = inputStream.read()
+                    if (b1 == -1) throw java.io.EOFException("Premature EOF scanning for magic byte")
+                }
             }
+
+            // 2. Read remaining header bytes (HEADER_SIZE - 2 = 90 bytes)
+            val headerRest = ByteArray(HEADER_SIZE - 2)
+            readFully(inputStream, headerRest)
+
+            val buffer = ByteBuffer.wrap(headerRest)
+            buffer.order(ByteOrder.BIG_ENDIAN)
 
             val version = buffer.get()
             val msgType = buffer.get()
@@ -212,7 +225,7 @@ data class DeadNetPacket(
             }
 
             return DeadNetPacket(
-                magic = magic,
+                magic = MAGIC,
                 version = version,
                 msgType = msgType,
                 msgId = msgId,

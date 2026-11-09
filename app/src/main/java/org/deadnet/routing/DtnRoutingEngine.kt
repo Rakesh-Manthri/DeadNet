@@ -173,8 +173,8 @@ class DtnRoutingEngine(
 
                 log("Received Handshake from $peerName. Public key registered.")
 
-                // Reply with our handshake if we just learned of them
-                if (isNew) {
+                // Always reply with handshake if newly learned or arrived on a different transport (e.g. Wi-Fi Direct)
+                if (isNew || sourceTransport.transportType == TransportType.WIFI_DIRECT) {
                     broadcastHandshake()
                 }
 
